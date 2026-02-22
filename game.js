@@ -227,7 +227,6 @@
     { id: 'persistence',     name: 'Persistence',      desc: 'Play 10 runs and keep going',      icon: 'hourglass' },
     { id: 'centurion',       name: 'Centurion',        desc: 'Play 100 runs like a true rider',  icon: 'award' },
   ];
-  localStorage.removeItem('nf_achievements'); // TEMP: reset achievements for testing
   let unlockedAch = JSON.parse(localStorage.getItem('nf_achievements') || '{}');
   let runCount = +localStorage.getItem('nf_run_count') || 0;
   let toastQueue = [];
@@ -1552,7 +1551,7 @@
         if (!spawnYBlocked(hy, 70)) {
           hoopCooldown = 80 + Math.random() * 70;
           const pts = baseR < 30 ? 50 : baseR < 44 ? 25 : 10;
-          if (pts >= 25) baseR *= 1.5625;
+          if (pts === 10) baseR *= 1.5625;
           hoops.push({
             x: W + baseR + 20, y: hy,
             radius: baseR, pts,
