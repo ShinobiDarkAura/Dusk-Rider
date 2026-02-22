@@ -110,6 +110,52 @@
   function rgb(c) { return `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`; }
   function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
+  // sample sky background color at a given Y (0..H) → [r, g, b]
+  function getSkyColorAt(y) {
+    const phase = (skyFrame / PHASE_DUR) % SKY.length;
+    const idx = phase | 0, t = phase - idx, st = t * t * (3 - 2 * t);
+    const a = SKY[idx], b = SKY[(idx + 1) % SKY.length];
+    const norm = clamp(y / H, 0, 1);
+    // find which gradient stops we're between
+    let si = 0;
+    for (let i = 1; i < SKY_STOPS.length; i++) {
+      if (norm <= SKY_STOPS[i]) { si = i - 1; break; }
+    }
+    const s0 = SKY_STOPS[si], s1 = SKY_STOPS[si + 1];
+    const st2 = (norm - s0) / (s1 - s0);
+    const c0 = lerpC(a.c[si], b.c[si], st);
+    const c1 = lerpC(a.c[si + 1], b.c[si + 1], st);
+    return lerpC(c0, c1, st2);
+  }
+
+  // get luminance (0-255) of an RGB color
+  function luminance(r, g, b) { return 0.299 * r + 0.587 * g + 0.114 * b; }
+
+  // adjust a color [r,g,b] to contrast well against bg [r,g,b]
+  function contrastColor(baseR, baseG, baseB, bgR, bgG, bgB) {
+    const bgLum = luminance(bgR, bgG, bgB);
+    const baseLum = luminance(baseR, baseG, baseB);
+    // if bg is dark, push color brighter; if bg is light, push darker/more saturated
+    if (bgLum < 90) {
+      // dark background — lighten the color
+      const boost = (90 - bgLum) / 90 * 0.5;
+      return `rgb(${clamp(baseR + boost * (255 - baseR), 0, 255) | 0},${clamp(baseG + boost * (255 - baseG), 0, 255) | 0},${clamp(baseB + boost * (255 - baseB), 0, 255) | 0})`;
+    }
+    if (bgLum > 160) {
+      // bright background — darken/saturate
+      const factor = 1 - (bgLum - 160) / 200;
+      return `rgb(${(baseR * factor) | 0},${(baseG * factor) | 0},${(baseB * factor) | 0})`;
+    }
+    // mid-range — check if hue is too close to bg
+    const contrast = Math.abs(baseLum - bgLum);
+    if (contrast < 50) {
+      // push away from bg luminance
+      if (bgLum > 127) return `rgb(${Math.max(0, baseR - 40) | 0},${Math.max(0, baseG - 40) | 0},${Math.max(0, baseB - 40) | 0})`;
+      return `rgb(${Math.min(255, baseR + 60) | 0},${Math.min(255, baseG + 60) | 0},${Math.min(255, baseB + 60) | 0})`;
+    }
+    return `rgb(${baseR | 0},${baseG | 0},${baseB | 0})`;
+  }
+
   function getDarkness() {
     const phase = (skyFrame / PHASE_DUR) % SKY.length;
     const idx = phase | 0, t = phase - idx;
@@ -1447,20 +1493,17 @@
       // chance for a fun formation instead of a single hoop
       const formationRoll = Math.random();
       if (formationRoll < 0.12) {
-        // horizontal row of 2-3 large hoops
-        const count = 2 + Math.floor(Math.random() * 2);
+        // horizontal row of 3-5 large hoops (10pt, progressively smaller)
+        const count = 3 + Math.floor(Math.random() * 3);
         const hy = H * 0.15 + Math.random() * (H * 0.35);
-        const spacing = 90 + Math.random() * 40;
-        let blocked = false;
-        for (let fi = 0; fi < count; fi++) {
-          if (spawnYBlocked(hy, 70)) { blocked = true; break; }
-        }
-        if (!blocked) {
+        const spacing = 85 + Math.random() * 35;
+        if (!spawnYBlocked(hy, 70)) {
           hoopCooldown = 200 + count * 40;
           const syncRot = Math.random() * Math.PI * 2;
           const fid = nextFormationId++;
           for (let fi = 0; fi < count; fi++) {
-            const baseR = 48 + Math.random() * 8;
+            const shrink = 1 - fi * 0.04; // each hoop ~4% smaller
+            const baseR = (48 + Math.random() * 8) * shrink;
             hoops.push({
               x: W + baseR + 20 + fi * spacing, y: hy,
               radius: baseR, pts: 10,
@@ -1491,7 +1534,7 @@
             const t = fi / (count - 1);
             const ax = W + 40 + fi * arcSpanX;
             const ay = centerY - Math.sin(t * Math.PI) * arcHeight;
-            const baseR = 22 + Math.random() * 4;
+            const baseR = (22 + Math.random() * 4) * 1.5625;
             hoops.push({
               x: ax, y: ay,
               radius: baseR, pts: 50,
@@ -1502,64 +1545,14 @@
             });
           }
         }
-      } else if (formationRoll < 0.32) {
-        // downward convex arc of 3-4 medium hoops (25pt)
-        const count = 3 + Math.floor(Math.random() * 2);
-        const centerY = H * 0.15 + Math.random() * (H * 0.25);
-        const arcSpanX = 110 + Math.random() * 40;
-        const arcHeight = 35 + Math.random() * 25;
-        let blocked = false;
-        for (let fi = 0; fi < count; fi++) {
-          const t = fi / (count - 1);
-          const ay = centerY + Math.sin(t * Math.PI) * arcHeight;
-          if (spawnYBlocked(ay, 55)) { blocked = true; break; }
-        }
-        if (!blocked) {
-          hoopCooldown = 180 + count * 35;
-          const syncRot3 = Math.random() * Math.PI * 2;
-          const fid = nextFormationId++;
-          for (let fi = 0; fi < count; fi++) {
-            const t = fi / (count - 1);
-            const ax = W + 40 + fi * arcSpanX;
-            const ay = centerY + Math.sin(t * Math.PI) * arcHeight;
-            const baseR = 32 + Math.random() * 6;
-            hoops.push({
-              x: ax, y: ay,
-              radius: baseR, pts: 25,
-              rot: syncRot3,
-              color: '#ff6622',
-              collected: false, collectTimer: 0,
-              formationId: fid, formationTotal: count,
-            });
-          }
-        }
-      } else if (formationRoll < 0.42) {
-        // horizontal row of 5 large hoops (10pt)
-        const hy = H * 0.15 + Math.random() * (H * 0.35);
-        const spacing = 85 + Math.random() * 30;
-        if (!spawnYBlocked(hy, 70)) {
-          hoopCooldown = 200 + 5 * 40;
-          const syncRot4 = Math.random() * Math.PI * 2;
-          const fid = nextFormationId++;
-          for (let fi = 0; fi < 5; fi++) {
-            const baseR = 48 + Math.random() * 8;
-            hoops.push({
-              x: W + baseR + 20 + fi * spacing, y: hy,
-              radius: baseR, pts: 10,
-              rot: syncRot4,
-              color: '#00ff88',
-              collected: false, collectTimer: 0,
-              formationId: fid, formationTotal: 5,
-            });
-          }
-        }
       } else {
         // normal single hoop
-        const baseR = 22 + Math.random() * 34;
+        let baseR = 22 + Math.random() * 34;
         const hy = H * 0.1 + Math.random() * (H * 0.45);
         if (!spawnYBlocked(hy, 70)) {
           hoopCooldown = 80 + Math.random() * 70;
           const pts = baseR < 30 ? 50 : baseR < 44 ? 25 : 10;
+          if (pts >= 25) baseR *= 1.5625;
           hoops.push({
             x: W + baseR + 20, y: hy,
             radius: baseR, pts,
@@ -1576,7 +1569,7 @@
       const lastP1 = poles[poles.length - 2], lastP2 = poles[poles.length - 1];
       // only attempt once per new pole pair (pole just appeared at right edge)
       if (lastP2.x > W - speed * dt * 2 && lastP2.x <= W + speed * dt * 2 + 50 && Math.random() < 0.05) {
-        const count = 2 + Math.floor(Math.random() * 3); // 2-4 hoops
+        const count = 3 + Math.floor(Math.random() * 2); // 3-4 hoops
         const span = lastP2.x - lastP1.x;
         const fid = nextFormationId++;
         for (let ui = 0; ui < count; ui++) {
@@ -1718,7 +1711,7 @@
         shieldPowerups.push({
           x: W + 30,
           y: sy,
-          size: 26,
+          size: 31,
           rot: 0,
           collected: false,
           collectTimer: 0,
@@ -1878,7 +1871,7 @@
 
     for (const ob of obstacles) {
       if (ob.type === 'kite') {
-        const ky = ob.baseY + Math.sin(ob.phase) * 12;
+        const ky = ob.baseY + Math.sin(ob.phase) * 45;
         const s = ob.size;
         const kiteAngle = 0.436 + Math.sin(ob.phase * 1.3) * 0.15;
         // kite body
@@ -1982,7 +1975,7 @@
     drawSky();
     drawStars();
     drawCelestial();
-    drawClouds();
+    // drawClouds(); // disabled for FPS
     if (lightningFlash > 0) drawLightning();
     drawSkyline();
     drawAmbientLife();
@@ -2550,7 +2543,7 @@
       }
 
       else if (ob.type === 'kite') {
-        const ky = ob.baseY + Math.sin(ob.phase) * 12;
+        const ky = ob.baseY + Math.sin(ob.phase) * 45;
         const s = ob.size;
         const kiteAngle = 0.436 + Math.sin(ob.phase * 1.3) * 0.15; // 25deg base + wobble
 
@@ -2741,22 +2734,15 @@
       const r = R * 0.12;
       const rot = h.rot;
 
-      // adjust hoop color: lighter in daytime, lighter at night for contrast
-      const dark = getDarkness();
+      // dynamic hoop color — contrast against sky at hoop's Y position
       const baseCol = h.color;
       const hr = parseInt(baseCol.slice(1, 3), 16);
       const hg = parseInt(baseCol.slice(3, 5), 16);
       const hb = parseInt(baseCol.slice(5, 7), 16);
-      // day: push toward white; night: brighten slightly for visibility
-      const blend = dark < 0.3 ? 0.15 : 0.25;
-      const cr = Math.min(255, Math.round(hr + (255 - hr) * blend));
-      const cg = Math.min(255, Math.round(hg + (255 - hg) * blend));
-      const cb = Math.min(255, Math.round(hb + (255 - hb) * blend));
-      const hoopCol = `rgb(${cr},${cg},${cb})`;
+      const bg = getSkyColorAt(h.y);
+      const hoopCol = contrastColor(hr, hg, hb, bg[0], bg[1], bg[2]);
       ctx.strokeStyle = hoopCol;
       ctx.lineWidth = 1.5;
-      ctx.shadowColor = hoopCol;
-      ctx.shadowBlur = 10;
 
       // Longitude lines (circles tracing the ring at different tube offsets)
       for (let j = 0; j < 3; j++) {
@@ -2775,10 +2761,10 @@
         ctx.stroke();
       }
 
-      // Meridian circles (small circles around the tube at positions along the ring)
+      // Meridian circles (batched into single path)
+      ctx.beginPath();
       for (let i = 0; i < 12; i++) {
         const theta = (i / 12) * Math.PI * 2;
-        ctx.beginPath();
         for (let j = 0; j <= 8; j++) {
           const phi = (j / 8) * Math.PI * 2;
           const rr = R + r * Math.cos(phi);
@@ -2789,11 +2775,10 @@
           if (j === 0) ctx.moveTo(sx, y3);
           else ctx.lineTo(sx, y3);
         }
-        ctx.stroke();
       }
+      ctx.stroke();
 
       // Point value inside hoop (fun typography)
-      ctx.shadowBlur = 0;
       const fontSize = Math.round(R * 0.5);
       ctx.font = `800 italic ${fontSize}px ${FONT}`;
       ctx.textAlign = 'center';
@@ -2846,24 +2831,24 @@
         x * Math.cos(rot) + z * Math.sin(rot), y
       ]);
 
-      ctx.strokeStyle = '#ffdd44';
-      ctx.shadowColor = '#ffdd44';
-      ctx.shadowBlur = 14;
+      // dynamic color — contrast against sky
+      const bgM = getSkyColorAt(pu.y);
+      const multiCol = contrastColor(255, 221, 68, bgM[0], bgM[1], bgM[2]);
+      ctx.strokeStyle = multiCol;
       ctx.lineWidth = 1.5;
 
+      ctx.beginPath();
       for (const [a, b] of edges) {
-        ctx.beginPath();
         ctx.moveTo(proj[a][0], proj[a][1]);
         ctx.lineTo(proj[b][0], proj[b][1]);
-        ctx.stroke();
       }
+      ctx.stroke();
 
       // "×2" label
-      ctx.shadowBlur = 0;
       ctx.font = `800 ${Math.round(s * 0.65)}px ${FONT}`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#ffdd44';
+      ctx.fillStyle = multiCol;
       ctx.globalAlpha = alpha * 0.8;
       ctx.fillText('\u00d72', 0, 0);
 
@@ -2925,19 +2910,18 @@
         return [rx, ry];
       });
 
-      ctx.strokeStyle = '#fff';
-      ctx.shadowColor = '#fff';
-      ctx.shadowBlur = 12;
+      // dynamic color — contrast against sky
+      const bgS = getSkyColorAt(sp.y);
+      const shieldCol = contrastColor(255, 255, 255, bgS[0], bgS[1], bgS[2]);
+      ctx.strokeStyle = shieldCol;
       ctx.lineWidth = 1.2;
 
+      ctx.beginPath();
       for (const [a, b] of edges) {
-        ctx.beginPath();
         ctx.moveTo(proj[a][0], proj[a][1]);
         ctx.lineTo(proj[b][0], proj[b][1]);
-        ctx.stroke();
       }
-
-      ctx.shadowBlur = 0;
+      ctx.stroke();
       ctx.restore();
     }
   }
@@ -2963,8 +2947,10 @@
 
       // Torus: major radius R, minor radius r
       const R = s * 0.55, r = s * 0.25;
-      const segsM = 10, segsT = 6; // major and tube segments
-      const verts = [];
+      const segsM = 10, segsT = 6;
+      // pre-compute vertex positions (flat array, 2 floats per vert)
+      const vertX = new Float32Array(segsM * segsT);
+      const vertY = new Float32Array(segsM * segsT);
       for (let i = 0; i < segsM; i++) {
         const theta = (i / segsM) * Math.PI * 2;
         const ct = Math.cos(theta), st = Math.sin(theta);
@@ -2974,19 +2960,20 @@
           const x3 = (R + r * cp) * ct;
           const y3 = r * sp;
           const z3 = (R + r * cp) * st;
-          // rotate around Y then X
           const rx = x3 * cosR + z3 * sinR;
           const rz = -x3 * sinR + z3 * cosR;
-          const ry = y3 * cosR2 - rz * sinR2;
-          verts.push([rx, ry]);
+          const idx = i * segsT + j;
+          vertX[idx] = rx;
+          vertY[idx] = y3 * cosR2 - rz * sinR2;
         }
       }
 
-      ctx.strokeStyle = '#00ddff';
-      ctx.shadowColor = '#00ddff';
-      ctx.shadowBlur = 14;
+      // dynamic color — contrast against sky
+      const bgR = getSkyColorAt(rp.y);
+      const rollCol = contrastColor(0, 221, 255, bgR[0], bgR[1], bgR[2]);
+      ctx.strokeStyle = rollCol;
       ctx.lineWidth = 1.2;
-
+      ctx.beginPath();
       for (let i = 0; i < segsM; i++) {
         const ni = (i + 1) % segsM;
         for (let j = 0; j < segsT; j++) {
@@ -2994,20 +2981,13 @@
           const a = i * segsT + j;
           const b = i * segsT + nj;
           const c = ni * segsT + j;
-          // ring edge
-          ctx.beginPath();
-          ctx.moveTo(verts[a][0], verts[a][1]);
-          ctx.lineTo(verts[b][0], verts[b][1]);
-          ctx.stroke();
-          // cross edge
-          ctx.beginPath();
-          ctx.moveTo(verts[a][0], verts[a][1]);
-          ctx.lineTo(verts[c][0], verts[c][1]);
-          ctx.stroke();
+          ctx.moveTo(vertX[a], vertY[a]);
+          ctx.lineTo(vertX[b], vertY[b]);
+          ctx.moveTo(vertX[a], vertY[a]);
+          ctx.lineTo(vertX[c], vertY[c]);
         }
       }
-
-      ctx.shadowBlur = 0;
+      ctx.stroke();
       ctx.restore();
     }
   }
@@ -3101,7 +3081,6 @@
     }
     ctx.scale(BIRD_SCALE, BIRD_SCALE);
     ctx.fillStyle = invincible ? '#fff' : '#000';
-    if (invincible) { ctx.shadowColor = '#fff'; ctx.shadowBlur = 10; }
     if (barrelRolling) { ctx.globalAlpha = 0.55; }
 
     // Wings spread wider when rising, relax when falling (smoothed)
@@ -3121,13 +3100,10 @@
     ctx.quadraticCurveTo(10, 1.5, 14, 0);                           // belly to beak
     ctx.closePath();
     ctx.fill();
-    if (invincible) { ctx.shadowBlur = 0; }
 
-    // white glowing tail when invincible
+    // white glowing tail when invincible (no shadow)
     if (invincible) {
       ctx.fillStyle = '#fff';
-      ctx.shadowColor = '#fff';
-      ctx.shadowBlur = 12;
       ctx.globalAlpha = 0.6 + Math.sin(frameCount * 0.15) * 0.2;
       ctx.beginPath();
       ctx.moveTo(-10, -1);
@@ -3137,7 +3113,6 @@
       ctx.lineTo(-10, 1);
       ctx.closePath();
       ctx.fill();
-      ctx.shadowBlur = 0;
       ctx.globalAlpha = 1;
     }
 
@@ -3238,7 +3213,7 @@
     if (multiplier > 1) {
       const cx = W - 40, cy = 150, cr = 18;
       // circular progress outline (depletes as timer runs out)
-      const progress = Math.max(0, multiplierTimer / 600); // 0→1
+      const progress = Math.max(0, multiplierTimer / 1200); // 0→1
       ctx.strokeStyle = 'rgba(255,221,68,0.6)';
       ctx.lineWidth = 3;
       ctx.beginPath();
@@ -3704,16 +3679,6 @@
       const baseFill = 'rgba(255,246,200,';
       ctx.save();
 
-      // backdrop blur (always full opacity)
-      ctx.save();
-      ctx.beginPath();
-      roundRect(ax, ay, colW, cardH, 13);
-      ctx.clip();
-      ctx.filter = 'blur(8px)';
-      ctx.drawImage(canvas, 0, 0, canvas.width, canvas.height, 0, 0, W, H);
-      ctx.filter = 'none';
-      ctx.restore();
-
       if (!unlocked && !hovered) ctx.globalAlpha = 0.6;
       ctx.fillStyle = baseFill + (hovered ? (unlocked ? '0.31)' : '0.23)') : (unlocked ? '0.23)' : '0.18)'));
       roundRect(ax, ay, colW, cardH, 13);
@@ -3818,21 +3783,10 @@
     ctx.globalAlpha = alpha;
 
     // shadow
-    ctx.shadowColor = 'rgba(0,0,0,0.72)';
-    ctx.shadowBlur = 38;
-    ctx.shadowOffsetX = 0;
-    ctx.shadowOffsetY = 6;
-
-    // translucent card background (matching achievements page cards)
+    // translucent card background
     roundRect(tx, ty, tw, th, 25);
     ctx.fillStyle = 'rgba(255,246,200,0.08)';
     ctx.fill();
-
-    // reset shadow so it doesn't affect text/icons
-    ctx.shadowColor = 'transparent';
-    ctx.shadowBlur = 0;
-    ctx.shadowOffsetX = 0;
-    ctx.shadowOffsetY = 0;
 
     // icon
     const midY = ty + th / 2 + 1;
