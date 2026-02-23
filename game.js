@@ -40,15 +40,18 @@
 
 
   let W, H;
+  const REF_H = 900;
+  let uiScale = 1;
   function resize() {
     const dpr = window.devicePixelRatio || 1;
-    W = window.innerWidth;
-    H = window.innerHeight;
-    canvas.width = W * dpr;
-    canvas.height = H * dpr;
-    canvas.style.width = W + 'px';
-    canvas.style.height = H + 'px';
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    uiScale = Math.min(window.innerHeight / REF_H, 1);
+    W = window.innerWidth / uiScale;
+    H = window.innerHeight / uiScale;
+    canvas.width = window.innerWidth * dpr;
+    canvas.height = window.innerHeight * dpr;
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+    ctx.setTransform(dpr * uiScale, 0, 0, dpr * uiScale, 0, 0);
   }
   window.addEventListener('resize', resize);
 
@@ -1418,11 +1421,11 @@
   });
 
   let mouseX = -1, mouseY = -1;
-  canvas.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
+  canvas.addEventListener('mousemove', e => { mouseX = e.clientX / uiScale; mouseY = e.clientY / uiScale; });
   canvas.addEventListener('mouseleave', () => { mouseX = -1; mouseY = -1; });
 
   canvas.addEventListener('mousedown', e => {
-    const mx = e.clientX, my = e.clientY;
+    const mx = e.clientX / uiScale, my = e.clientY / uiScale;
     if (rollTutorialActive) { rollTutorialActive = false; return; }
     if (mx > W - 56 && my > H - 48) { toggleMusic(); return; }
     // if (mx > W - 100 && mx < W - 56 && my > H - 48) { skipTrack(); return; }
@@ -4186,14 +4189,17 @@
     ctx.font = `400 42px "Antique33", ${FONT}`; ctx.fillStyle = 'rgba(255,255,255,0.6)';
     ctx.fillText(points + ' pts', W / 2, H / 2 + 30);
 
-    // new best chip
+    // new best chip (above the distance number)
     if ((distance | 0) >= highDist && distance > 0) {
-      const chipW = 48, chipH = 24, chipY = H / 2 - 50 + 126 / 2 + 32;
+      const chipH = 26, chipY = H / 2 - 50 - 126 / 2 - 24;
+      ctx.font = `700 11px ${FONT}`;
+      ctx.letterSpacing = '1.5px';
+      const textW = ctx.measureText('NEW BEST').width;
+      const chipW = textW + 24;
       ctx.fillStyle = '#fff';
       roundRect(W / 2 - chipW / 2, chipY - chipH / 2, chipW, chipH, chipH / 2);
       ctx.fill();
-      ctx.font = `700 10px ${FONT}`; ctx.fillStyle = '#000';
-      ctx.letterSpacing = '1.5px';
+      ctx.fillStyle = '#000';
       ctx.fillText('NEW BEST', W / 2, chipY);
       ctx.letterSpacing = '0px';
     }
