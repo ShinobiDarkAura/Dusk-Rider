@@ -131,27 +131,32 @@
   // get luminance (0-255) of an RGB color
   function luminance(r, g, b) { return 0.299 * r + 0.587 * g + 0.114 * b; }
 
-  // adjust a color [r,g,b] to contrast well against bg [r,g,b]
+  // adjust a color [r,g,b] to always contrast strongly against bg [r,g,b]
   function contrastColor(baseR, baseG, baseB, bgR, bgG, bgB) {
     const bgLum = luminance(bgR, bgG, bgB);
-    const baseLum = luminance(baseR, baseG, baseB);
-    // if bg is dark, push color brighter; if bg is light, push darker/more saturated
-    if (bgLum < 90) {
-      // dark background — lighten the color
-      const boost = (90 - bgLum) / 90 * 0.5;
-      return `rgb(${clamp(baseR + boost * (255 - baseR), 0, 255) | 0},${clamp(baseG + boost * (255 - baseG), 0, 255) | 0},${clamp(baseB + boost * (255 - baseB), 0, 255) | 0})`;
+    // dark background → push toward white
+    if (bgLum < 80) {
+      const t = bgLum / 80; // 0 = very dark, 1 = threshold
+      const r = baseR + (255 - baseR) * (1 - t) * 0.7;
+      const g = baseG + (255 - baseG) * (1 - t) * 0.7;
+      const b = baseB + (255 - baseB) * (1 - t) * 0.7;
+      return `rgb(${clamp(r, 0, 255) | 0},${clamp(g, 0, 255) | 0},${clamp(b, 0, 255) | 0})`;
     }
-    if (bgLum > 160) {
-      // bright background — darken/saturate
-      const factor = 1 - (bgLum - 160) / 200;
+    // bright background → darken aggressively
+    if (bgLum > 140) {
+      const t = (bgLum - 140) / 115; // 0 = threshold, 1 = white
+      const factor = Math.max(0.2, 1 - t * 0.8);
       return `rgb(${(baseR * factor) | 0},${(baseG * factor) | 0},${(baseB * factor) | 0})`;
     }
-    // mid-range — check if hue is too close to bg
-    const contrast = Math.abs(baseLum - bgLum);
-    if (contrast < 50) {
-      // push away from bg luminance
-      if (bgLum > 127) return `rgb(${Math.max(0, baseR - 40) | 0},${Math.max(0, baseG - 40) | 0},${Math.max(0, baseB - 40) | 0})`;
-      return `rgb(${Math.min(255, baseR + 60) | 0},${Math.min(255, baseG + 60) | 0},${Math.min(255, baseB + 60) | 0})`;
+    // mid-range — ensure minimum contrast by checking per-channel closeness
+    const dr = Math.abs(baseR - bgR), dg = Math.abs(baseG - bgG), db = Math.abs(baseB - bgB);
+    const totalDiff = dr + dg + db;
+    if (totalDiff < 180) {
+      // too similar — shift away from bg
+      const r = bgLum > 110 ? Math.max(0, baseR - 80) : Math.min(255, baseR + 80);
+      const g = bgLum > 110 ? Math.max(0, baseG - 80) : Math.min(255, baseG + 80);
+      const b = bgLum > 110 ? Math.max(0, baseB - 80) : Math.min(255, baseB + 80);
+      return `rgb(${r | 0},${g | 0},${b | 0})`;
     }
     return `rgb(${baseR | 0},${baseG | 0},${baseB | 0})`;
   }
@@ -246,6 +251,8 @@
   let dawnReached = false;
   let medalHoverT = 0; // smooth hover transition for achievements icon (0→1)
   let backHoverT = 0;  // smooth hover transition for back button (0→1)
+  let achTransition = 0; // 0 = no transition, counts up to 1
+  let achTransDir = 0;   // 1 = opening achievements, -1 = closing back to home
   let lbHoverT = 0;    // smooth hover transition for leaderboard icon (0→1)
   let titleHoverT = 0; // smooth hover transition for title (0→1)
   let zenMode = false; // zen mode — no death, fly forever
@@ -293,12 +300,14 @@
       });
   }
 
-  function drawAchievementIcon(iconType, cx, cy, size, unlocked) {
+  const ACH_HOVER_COLOR = '#ffdd44';
+
+  function drawAchievementIcon(iconType, cx, cy, size, unlocked, tintColor) {
     const entry = lucideImgs[iconType];
     if (!entry || !entry.loaded) return;
     ctx.save();
     if (!unlocked) ctx.globalAlpha *= 0.6;
-    const color = '#ffffff';
+    const color = tintColor || '#ffffff';
     // tint via offscreen canvas at DPR resolution for crisp rendering
     const dpr = window.devicePixelRatio || 1;
     const s = Math.ceil(size * dpr);
@@ -378,6 +387,32 @@
     ambientGain.gain.setValueAtTime(0, ac.currentTime);
     ambientGain.gain.linearRampToValueAtTime(0.09, ac.currentTime + 2.5);
     ambientSource.start(0);
+  }
+
+  // ---- wind gust sound ----
+  async function loadWindSound() {
+    const ac = getSfx();
+    try {
+      const resp = await fetch('assets/wind.mp3');
+      if (!resp.ok) return;
+      const buf = await resp.arrayBuffer();
+      windBuffer = await ac.decodeAudioData(buf);
+    } catch (_) { /* file not found — skip silently */ }
+  }
+
+  function playWindGust() {
+    if (!musicOn || !windBuffer) return;
+    const ac = getSfx();
+    const src = ac.createBufferSource();
+    const gain = ac.createGain();
+    src.buffer = windBuffer;
+    // slow playback to stretch duration by ~0.5s
+    const dur = windBuffer.duration;
+    src.playbackRate.value = dur / (dur + 0.5);
+    src.connect(gain);
+    gain.connect(ac.destination);
+    gain.gain.setValueAtTime(0.21, ac.currentTime);
+    src.start(0);
   }
 
   function stopAmbientSounds(fadeDuration) {
@@ -469,6 +504,13 @@
   let shieldPowerups = [];
   let shieldCooldown = 0;
   let sparkles = []; // white sparkle particles on tail
+
+  // ---- wind gust speed boost ----
+  let gustKm = 0;          // last km milestone crossed
+  let gustTimer = 0;       // visual effect countdown
+  let gustStreaks = [];     // horizontal wind streak particles
+  let gustSpeedMult = 1;   // cumulative speed multiplier (doubles each km)
+  let windBuffer = null;   // decoded AudioBuffer for wind.mp3
 
   // ---- wind trail ----
   const TRAIL_LEN = 60;
@@ -802,6 +844,142 @@
     }
   }
 
+  function playUIClick() {
+    if (!musicOn) return;
+    const ac = getSfx();
+    const t = ac.currentTime;
+    // warm soft "pop" — two sine tones a fifth apart
+    const osc1 = ac.createOscillator();
+    const g1 = ac.createGain();
+    osc1.connect(g1); g1.connect(ac.destination);
+    osc1.type = 'sine';
+    osc1.frequency.setValueAtTime(440, t);
+    g1.gain.setValueAtTime(0.036, t);
+    g1.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+    osc1.start(t); osc1.stop(t + 0.15);
+
+    const osc2 = ac.createOscillator();
+    const g2 = ac.createGain();
+    osc2.connect(g2); g2.connect(ac.destination);
+    osc2.type = 'sine';
+    osc2.frequency.setValueAtTime(660, t + 0.02);
+    g2.gain.setValueAtTime(0.024, t + 0.02);
+    g2.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+    osc2.start(t + 0.02); osc2.stop(t + 0.18);
+  }
+
+  function playStartGliss() {
+    if (!musicOn) return;
+    const ac = getSfx();
+    const t = ac.currentTime;
+    // Part 1: ascending C major arpeggio that hangs on the dominant — tension
+    const notes = [523, 659, 784]; // C5 E5 G5 — ends unresolved on the 5th
+    const step = 0.04;
+    for (let i = 0; i < notes.length; i++) {
+      const osc = ac.createOscillator();
+      const g = ac.createGain();
+      osc.connect(g); g.connect(ac.destination);
+      osc.type = 'sine';
+      const start = t + i * step;
+      osc.frequency.setValueAtTime(notes[i], start);
+      g.gain.setValueAtTime(0, start);
+      g.gain.linearRampToValueAtTime(0.033 - i * 0.0048, start + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.001, start + 0.14);
+      osc.start(start);
+      osc.stop(start + 0.17);
+    }
+  }
+
+  function playLaunchGliss() {
+    if (!musicOn) return;
+    const ac = getSfx();
+    const t = ac.currentTime;
+    // Part 2: picks up from the dominant and resolves to the octave — release
+    const notes = [784, 880, 1047]; // G5 A5 C6 — resolves up to tonic
+    const step = 0.035;
+    for (let i = 0; i < notes.length; i++) {
+      const osc = ac.createOscillator();
+      const g = ac.createGain();
+      osc.connect(g); g.connect(ac.destination);
+      osc.type = 'sine';
+      const start = t + i * step;
+      osc.frequency.setValueAtTime(notes[i], start);
+      g.gain.setValueAtTime(0, start);
+      g.gain.linearRampToValueAtTime(0.033 - i * 0.0048, start + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.001, start + 0.14);
+      osc.start(start);
+      osc.stop(start + 0.17);
+    }
+  }
+
+  function playPauseGliss() {
+    if (!musicOn) return;
+    const ac = getSfx();
+    const t = ac.currentTime;
+    // descending pentatonic gliss — settling down
+    const notes = [880, 784, 659, 587, 523]; // A5 G5 E5 D5 C5
+    const step = 0.035;
+    for (let i = 0; i < notes.length; i++) {
+      const osc = ac.createOscillator();
+      const g = ac.createGain();
+      osc.connect(g); g.connect(ac.destination);
+      osc.type = 'sine';
+      const start = t + i * step;
+      osc.frequency.setValueAtTime(notes[i], start);
+      g.gain.setValueAtTime(0, start);
+      g.gain.linearRampToValueAtTime(0.033 - i * 0.0036, start + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.001, start + 0.12);
+      osc.start(start);
+      osc.stop(start + 0.15);
+    }
+  }
+
+  function playUnpauseGliss() {
+    if (!musicOn) return;
+    const ac = getSfx();
+    const t = ac.currentTime;
+    // ascending pentatonic gliss — lifting back up
+    const notes = [523, 587, 659, 784, 880]; // C5 D5 E5 G5 A5
+    const step = 0.035;
+    for (let i = 0; i < notes.length; i++) {
+      const osc = ac.createOscillator();
+      const g = ac.createGain();
+      osc.connect(g); g.connect(ac.destination);
+      osc.type = 'sine';
+      const start = t + i * step;
+      osc.frequency.setValueAtTime(notes[i], start);
+      g.gain.setValueAtTime(0, start);
+      g.gain.linearRampToValueAtTime(0.033 - i * 0.0036, start + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.001, start + 0.12);
+      osc.start(start);
+      osc.stop(start + 0.15);
+    }
+  }
+
+  function playZenToggle() {
+    if (!musicOn) return;
+    const ac = getSfx();
+    const t = ac.currentTime;
+    // softer, lower pop — two tones a major third apart
+    const osc1 = ac.createOscillator();
+    const g1 = ac.createGain();
+    osc1.connect(g1); g1.connect(ac.destination);
+    osc1.type = 'sine';
+    osc1.frequency.setValueAtTime(330, t);
+    g1.gain.setValueAtTime(0.03, t);
+    g1.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
+    osc1.start(t); osc1.stop(t + 0.17);
+
+    const osc2 = ac.createOscillator();
+    const g2 = ac.createGain();
+    osc2.connect(g2); g2.connect(ac.destination);
+    osc2.type = 'sine';
+    osc2.frequency.setValueAtTime(415, t + 0.03);
+    g2.gain.setValueAtTime(0.021, t + 0.03);
+    g2.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+    osc2.start(t + 0.03); osc2.stop(t + 0.19);
+  }
+
   function playMultiplierSound() {
     if (!musicOn) return;
     const ac = getSfx();
@@ -848,15 +1026,15 @@
     const g1 = ac.createGain();
     o1.type = 'sine';
     o1.frequency.setValueAtTime(120, t);
-    o1.frequency.exponentialRampToValueAtTime(220, t + 0.3);
-    o1.frequency.exponentialRampToValueAtTime(160, t + 0.8);
+    o1.frequency.exponentialRampToValueAtTime(220, t + 0.8);
+    o1.frequency.exponentialRampToValueAtTime(160, t + 1.3);
     g1.gain.setValueAtTime(0.06, t);
     g1.gain.linearRampToValueAtTime(0.08, t + 0.15);
-    g1.gain.exponentialRampToValueAtTime(0.001, t + 1.0);
+    g1.gain.exponentialRampToValueAtTime(0.001, t + 1.5);
     o1.connect(g1); g1.connect(ac.destination);
-    o1.start(t); o1.stop(t + 1.05);
+    o1.start(t); o1.stop(t + 1.55);
     // 2) soft filtered noise — airy wash
-    const buf = ac.createBuffer(1, ac.sampleRate * 1.2, ac.sampleRate);
+    const buf = ac.createBuffer(1, ac.sampleRate * 1.7, ac.sampleRate);
     const data = buf.getChannelData(0);
     for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
     const noise = ac.createBufferSource();
@@ -865,34 +1043,34 @@
     lp.type = 'lowpass';
     lp.frequency.setValueAtTime(400, t);
     lp.frequency.linearRampToValueAtTime(600, t + 0.2);
-    lp.frequency.exponentialRampToValueAtTime(200, t + 0.9);
+    lp.frequency.exponentialRampToValueAtTime(200, t + 1.4);
     lp.Q.value = 1;
     const ng = ac.createGain();
     ng.gain.setValueAtTime(0.04, t);
     ng.gain.linearRampToValueAtTime(0.06, t + 0.15);
-    ng.gain.exponentialRampToValueAtTime(0.001, t + 1.0);
+    ng.gain.exponentialRampToValueAtTime(0.001, t + 1.5);
     noise.connect(lp); lp.connect(ng); ng.connect(ac.destination);
-    noise.start(t); noise.stop(t + 1.1);
+    noise.start(t); noise.stop(t + 1.6);
     // 3) shimmer overtone — gentle fifth that fades in then out
     const o2 = ac.createOscillator();
     const g2 = ac.createGain();
     o2.type = 'sine';
     o2.frequency.setValueAtTime(330, t + 0.1);
-    o2.frequency.exponentialRampToValueAtTime(247, t + 0.8);
+    o2.frequency.exponentialRampToValueAtTime(247, t + 1.3);
     g2.gain.setValueAtTime(0.001, t);
     g2.gain.linearRampToValueAtTime(0.035, t + 0.25);
-    g2.gain.exponentialRampToValueAtTime(0.001, t + 0.9);
+    g2.gain.exponentialRampToValueAtTime(0.001, t + 1.4);
     o2.connect(g2); g2.connect(ac.destination);
-    o2.start(t); o2.stop(t + 0.95);
+    o2.start(t); o2.stop(t + 1.45);
     // 4) sub-bass thud for weight
     const o3 = ac.createOscillator();
     const g3 = ac.createGain();
     o3.type = 'sine';
     o3.frequency.value = 65;
     g3.gain.setValueAtTime(0.07, t);
-    g3.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+    g3.gain.exponentialRampToValueAtTime(0.001, t + 0.9);
     o3.connect(g3); g3.connect(ac.destination);
-    o3.start(t); o3.stop(t + 0.45);
+    o3.start(t); o3.stop(t + 0.95);
   }
 
   function playRollPickupSound() {
@@ -951,8 +1129,11 @@
   }
 
   function toggleMusic() {
+    // play toggle sound before muting (so it's audible on mute)
+    if (musicOn) playZenToggle();
     musicOn = !musicOn;
     if (musicOn) {
+      playZenToggle();
       if (state === STATE.PLAY && bgMusic) bgMusic.play().catch(() => {});
     } else {
       if (bgMusic) bgMusic.pause();
@@ -980,11 +1161,12 @@
     barrelRolling = false; barrelRollTimer = 0; barrelRollBoost = 0;
     rollCharges = 0; rollPowerups = []; rollCooldown = 900;
     particles = []; trail = []; pointPopups = [];
+    gustKm = 0; gustTimer = 0; gustStreaks = []; gustSpeedMult = 1;
     hoopsThisRun = 0; hoopStreak = 0; goldStreak = 0; lastHoopX = 0; lastHoopTime = 0; rapidHoopStreak = 0; barrelRollsThisRun = 0; nextFormationId = 1; for (const k in formationHits) delete formationHits[k];
     nearMissTimer = 0; nearMissId = null;
     nightReached = false; dawnReached = false;
     rng = mulberry32(7);
-    let nextX = -POLE_WIDTH * 2, lastH = MIN_POLE_H + 40;
+    let nextX = -POLE_WIDTH * 2, lastH = MIN_POLE_H + 104;
     while (nextX < W + spacing * 2) { lastH = spawnPole(nextX, lastH, true); nextX += spacing; }
     rng = Math.random;
 
@@ -1024,7 +1206,7 @@
     perchHeadAngle = 0;
     perchBlinkTimer = 0;
 
-    bird.x = 216;
+    bird.x = 288;
     if (poles.length >= 2) {
       const p1 = poles[0], p2 = poles[1];
       const wd = WIRE_DEFS[0];
@@ -1048,6 +1230,7 @@
 
   function launchFromPerch() {
     if (homePhaseTimer < 30) return; // don't allow instant launch after phase change
+    playLaunchGliss();
     state = STATE.PLAY;
     launchTimer = 1;
     launchGrace = 300; // ~5s collision immunity (covers 4s fly-in)
@@ -1095,7 +1278,7 @@
     else if (r < 0.52) type = 'kite';
     else if (r < 0.68) type = 'balloon';
     else if (r < 0.84) type = 'flock';
-    else if (r < 0.92) type = 'paperplane';
+    else if (r < 0.946) type = 'paperplane';
     else type = 'bird';
     // never spawn two paper airplanes in a row
     if (type === 'paperplane' && lastObsType === 'paperplane') type = 'bird';
@@ -1117,7 +1300,7 @@
         ob.sinPhase = Math.random() * Math.PI * 2;
       }
     } else if (type === 'kite') {
-      ob.y = H * 0.48 + Math.random() * (H * 0.25);
+      ob.y = H * 0.2 + Math.random() * (H * 0.53);
       ob.baseY = ob.y;
       ob.vx = 0;
       ob.vy = 0;
@@ -1159,12 +1342,12 @@
       else if (zone < 0.66) ob.y = H * 0.3 + Math.random() * H * 0.25;  // center
       else ob.y = H * 0.6 + Math.random() * H * 0.2;                     // bottom quarter
       ob.vx = -(1.4 + Math.random() * 0.8);
-      ob.vy = (Math.random() - 0.4) * 0.3;         // can drift slightly up or down
+      ob.vy = (Math.random() - 0.4) * 0.3;
       ob.gravity = 0.002 + Math.random() * 0.002;
       ob.wobblePhase = Math.random() * Math.PI * 2;
       ob.wobbleFreq = 0.025 + Math.random() * 0.01;
-      ob.wobbleAmp = 0.12 + Math.random() * 0.06;   // subtle pitch wobble (radians)
-      ob.size = 14 + Math.random() * 9;
+      ob.wobbleAmp = 0.12 + Math.random() * 0.06;
+      ob.size = (14 + Math.random() * 9) * 1.797;
       ob.hitR = ob.size * 0.7;
     } else if (type === 'flag') {
       // large silhouetted flag on a pole — foreground obstacle (closer to camera = bigger)
@@ -1193,28 +1376,30 @@
       e.preventDefault();
       if (state === STATE.HOME) {
         startAudio();
-        if (homePhase === 0) { homePhase = 1; homePhaseTimer = 0; titleFadeOut = 30; return; }
+        if (homePhase === 0) { playStartGliss(); homePhase = 1; homePhaseTimer = 0; titleFadeOut = 30; return; }
         launchFromPerch(); inputHeld = true; return;
       }
-      if (state === STATE.ACHIEVEMENTS) { state = STATE.HOME; startAmbientSounds(); return; }
-      if (state === STATE.DEAD) { resetGame(); setupPerch(); state = STATE.HOME; startAmbientSounds(); return; }
+      if (state === STATE.ACHIEVEMENTS) { playUIClick(); state = STATE.HOME; startAmbientSounds(); achTransition = 0; achTransDir = -1; return; }
+      if (state === STATE.DEAD) { playUIClick(); resetGame(); setupPerch(); state = STATE.HOME; startAmbientSounds(); return; }
       if (state === STATE.PLAY) { inputHeld = true; return; }
     }
     if (e.code === 'Escape') {
-      if (state === STATE.ACHIEVEMENTS) { state = STATE.HOME; startAmbientSounds(); return; }
+      if (state === STATE.ACHIEVEMENTS) { playUIClick(); state = STATE.HOME; startAmbientSounds(); achTransition = 0; achTransDir = -1; return; }
     }
     if (e.code === 'KeyP' || e.code === 'Escape') {
       if (state === STATE.PLAY) {
+        playPauseGliss();
         state = STATE.PAUSE;
         inputHeld = false;
         if (bgMusic && musicOn) fadeMusic(800);
       } else if (state === STATE.PAUSE) {
+        playUnpauseGliss();
         state = STATE.PLAY;
         if (bgMusic && musicOn) bgMusic.play().catch(() => {});
       }
     }
     if (e.code === 'KeyR' && state === STATE.PAUSE) {
-      resetGame(); setupPerch(); state = STATE.HOME; startAmbientSounds(); return;
+      playUIClick(); resetGame(); setupPerch(); state = STATE.HOME; startAmbientSounds(); return;
     }
     if ((e.code === 'ShiftLeft' || e.code === 'ShiftRight') && state === STATE.PLAY && !barrelRolling && rollCharges > 0) {
       rollCharges--;
@@ -1245,25 +1430,25 @@
     if (state === STATE.HOME) {
       startAudio();
       // Zen toggle click (bottom-center)
-      if (mx > W / 2 - 40 && mx < W / 2 + 40 && my > H - 48) { zenMode = !zenMode; return; }
+      if (mx > W / 2 - 40 && mx < W / 2 + 40 && my > H - 48) { playZenToggle(); zenMode = !zenMode; return; }
       // Achievements icon click (top-right) — works in both phases
-      if (mx > W - 68 && my < 58) { state = STATE.ACHIEVEMENTS; return; }
+      if (mx > W - 68 && my < 58) { playUIClick(); state = STATE.ACHIEVEMENTS; achTransition = 0; achTransDir = 1; return; }
       // // Leaderboard icon click (below achievements icon) — works in both phases
       // if (mx > W - 68 && my >= 58 && my < 112) { state = STATE.LEADERBOARD; return; }
-      if (homePhase === 0) { homePhase = 1; homePhaseTimer = 0; titleFadeOut = 30; return; }
+      if (homePhase === 0) { playStartGliss(); homePhase = 1; homePhaseTimer = 0; titleFadeOut = 30; return; }
       // Phase 1: click launches — keep input held so bird continues rising
       launchFromPerch(); inputHeld = true; return;
     }
 
     if (state === STATE.ACHIEVEMENTS) {
       // back arrow button (top-left)
-      if (mx < 60 && my < 60) { state = STATE.HOME; startAmbientSounds(); return; }
+      if (mx < 60 && my < 60) { playUIClick(); state = STATE.HOME; startAmbientSounds(); achTransition = 0; achTransDir = -1; return; }
       return;
     }
 
     if (state === STATE.LEADERBOARD) {
       // back arrow button (top-left)
-      if (mx < 60 && my < 60) { state = STATE.HOME; startAmbientSounds(); return; }
+      if (mx < 60 && my < 60) { playUIClick(); state = STATE.HOME; startAmbientSounds(); return; }
       return;
     }
 
@@ -1272,12 +1457,13 @@
     }
 
     if (state === STATE.PAUSE) {
+      playUnpauseGliss();
       state = STATE.PLAY;
       if (bgMusic && musicOn) bgMusic.play().catch(() => {});
       return;
     }
 
-    if (state === STATE.DEAD) { resetGame(); setupPerch(); state = STATE.HOME; startAmbientSounds(); return; }
+    if (state === STATE.DEAD) { playUIClick(); resetGame(); setupPerch(); state = STATE.HOME; startAmbientSounds(); return; }
   });
 
 
@@ -1338,7 +1524,7 @@
     if (launchTimer >= LAUNCH_DUR) launchTimer = LAUNCH_DUR;
     if (launchGrace > 0) launchGrace -= dt;
 
-    speed = Math.min(MAX_SPEED, BASE_SPEED + distance * SPEED_INCREASE);
+    speed = (BASE_SPEED + distance * SPEED_INCREASE) * gustSpeedMult;
     // ease into full speed over first 180 frames (~3s)
     const SPEED_RAMP_DUR = 180;
     if (launchTimer > 0 && launchTimer < SPEED_RAMP_DUR) {
@@ -1424,6 +1610,34 @@
     distance += speed * dt * 0.01;
     displayDist += (distance - displayDist) * 0.12 * dt;
 
+    // ---- wind gust speed boost at each 1km ----
+    const currentKm = Math.floor(distance / 1000);
+    if (currentKm > gustKm) {
+      gustKm = currentKm;
+      gustSpeedMult *= 1.1;
+      gustTimer = 60;
+      playWindGust();
+      // spawn wind streaks behind bird
+      for (let i = 0; i < 20; i++) {
+        gustStreaks.push({
+          x: bird.x - 10 - Math.random() * 30,
+          y: bird.y + (Math.random() - 0.5) * 80,
+          vx: -(4 + Math.random() * 8),
+          len: 30 + Math.random() * 50,
+          life: 40 + Math.random() * 20,
+          maxLife: 40 + Math.random() * 20,
+        });
+      }
+    }
+    // update gust streaks
+    if (gustTimer > 0) gustTimer -= dt;
+    for (let i = gustStreaks.length - 1; i >= 0; i--) {
+      const s = gustStreaks[i];
+      s.x += s.vx * dt;
+      s.life -= dt;
+      if (s.life <= 0 || s.x + s.len < -50) { gustStreaks.splice(i, 1); }
+    }
+
     // poles
     const spacing = getPoleSpacing();
     for (let i = 0; i < poles.length; i++) poles[i].x -= speed * dt;
@@ -1461,12 +1675,11 @@
       if (ob.type === 'paperplane') {
         // natural glide — gentle descent with increasing gravity, subtle pitch wobble
         ob.vy += ob.gravity * dt;
-        ob.vy = Math.min(ob.vy, 1.8); // terminal velocity cap
-        // arc upward before reaching wire level — never stay below the power lines
+        ob.vy = Math.min(ob.vy, 1.8);
         const wireFloor = H - MIN_POLE_H + WIRE_TOP_OFFSET - 30;
         if (ob.y > wireFloor) {
-          ob.vy -= 0.02 * dt; // gentle upward pull
-          if (ob.vy > 0) ob.vy *= 0.92; // dampen downward velocity
+          ob.vy -= 0.02 * dt;
+          if (ob.vy > 0) ob.vy *= 0.92;
         }
         ob.y += ob.vy * dt;
         ob.wobblePhase += ob.wobbleFreq * dt;
@@ -1533,7 +1746,7 @@
             const t = fi / (count - 1);
             const ax = W + 40 + fi * arcSpanX;
             const ay = centerY - Math.sin(t * Math.PI) * arcHeight;
-            const baseR = (22 + Math.random() * 4) * 1.5625;
+            const baseR = (22 + Math.random() * 4) * 2.03;
             hoops.push({
               x: ax, y: ay,
               radius: baseR, pts: 50,
@@ -1552,11 +1765,13 @@
           hoopCooldown = 80 + Math.random() * 70;
           const pts = baseR < 30 ? 50 : baseR < 44 ? 25 : 10;
           if (pts === 10) baseR *= 1.5625;
+          else if (pts === 25) baseR *= 1.3;
+          else baseR *= 1.69;
           hoops.push({
             x: W + baseR + 20, y: hy,
             radius: baseR, pts,
             rot: Math.random() * Math.PI * 2,
-            color: pts === 50 ? '#e8a835' : pts === 25 ? '#ff6622' : '#00ff88',
+            color: pts === 50 ? '#e8a835' : pts === 25 ? '#44bbff' : '#00ff88',
             collected: false, collectTimer: 0,
           });
         }
@@ -1657,7 +1872,7 @@
       if (!spawnYBlocked(py, 70)) {
         powerupCooldown = 500 + Math.random() * 400;
         powerups.push({
-          x: W + 30, y: py, size: 34, rot: 0, collected: false, collectTimer: 0,
+          x: W + 30, y: py, size: 39, rot: 0, collected: false, collectTimer: 0,
         });
       }
     }
@@ -1710,7 +1925,7 @@
         shieldPowerups.push({
           x: W + 30,
           y: sy,
-          size: 31,
+          size: 37,
           rot: 0,
           collected: false,
           collectTimer: 0,
@@ -1746,7 +1961,7 @@
       const tooClose = powerups.some(p => p.x > W * 0.5) || shieldPowerups.some(p => !p.collected && p.x > W * 0.3) || rollPowerups.some(p => !p.collected && p.x > W * 0.3);
       if (!tooClose && !spawnYBlocked(ry, 70)) {
         rollCooldown = 700 + Math.random() * 400;
-        rollPowerups.push({ x: W + 30, y: ry, size: 46, rot: 0, collected: false, collectTimer: 0 });
+        rollPowerups.push({ x: W + 30, y: ry, size: 46, rot: Math.PI, collected: false, collectTimer: 0 });
       }
     }
     for (let i = rollPowerups.length - 1; i >= 0; i--) {
@@ -1994,6 +2209,7 @@
       drawShieldPowerups();
       drawRollPowerups();
       drawTrail();
+      drawGustStreaks();
       drawSparkles();
       drawPlayer();
       drawParticles();
@@ -2627,11 +2843,8 @@
           ctx.moveTo(14, 0);
           ctx.quadraticCurveTo(10, -1.5, 4, -2);
           ctx.bezierCurveTo(-2, -2.8 + w * 0.15, -10, -6 + w, -20, -4.5 + w * 0.7);
-          ctx.quadraticCurveTo(-15, -2.5 + w * 0.2, -10, -1);
-          ctx.lineTo(-14, -1.8);
-          ctx.lineTo(-11, 0);
-          ctx.lineTo(-14, 1.8);
-          ctx.lineTo(-10, 1);
+          ctx.quadraticCurveTo(-15, -2.5 + w * 0.2, -10, 0);
+          ctx.lineTo(-10, 0);
           ctx.quadraticCurveTo(-15, 2.5 - w * 0.2, -20, 4.5 - w * 0.7);
           ctx.bezierCurveTo(-10, 6 - w, -2, 2.8 - w * 0.15, 4, 2);
           ctx.quadraticCurveTo(10, 1.5, 14, 0);
@@ -2855,7 +3068,7 @@
     }
   }
 
-  // ---- SHIELD POWERUP (invincibility — 3D wireframe stellated octahedron) ----
+  // ---- SHIELD POWERUP (invincibility — 3D wireframe star) ----
   function drawShieldPowerups() {
     for (const sp of shieldPowerups) {
       if (sp.x < -60 || sp.x > W + 60) continue;
@@ -2873,40 +3086,32 @@
       const rot = sp.rot;
       const cosR = Math.cos(rot), sinR = Math.sin(rot);
 
-      // Stellated octahedron: inner cube + outer star points
-      const inner = s * 0.5;
-      const outer = s * 1.1;
-      // 8 cube vertices + 6 star tips
-      const verts3D = [
-        [-inner, -inner, -inner], [inner, -inner, -inner],
-        [inner, inner, -inner], [-inner, inner, -inner],
-        [-inner, -inner, inner], [inner, -inner, inner],
-        [inner, inner, inner], [-inner, inner, inner],
-        [outer, 0, 0], [-outer, 0, 0],
-        [0, outer, 0], [0, -outer, 0],
-        [0, 0, outer], [0, 0, -outer],
-      ];
-      // Cube edges + star spike edges from cube faces to tips
-      const edges = [
-        [0,1],[1,2],[2,3],[3,0], // front face
-        [4,5],[5,6],[6,7],[7,4], // back face
-        [0,4],[1,5],[2,6],[3,7], // connectors
-        // star spikes — tips to nearest cube verts
-        [8,1],[8,2],[8,5],[8,6],   // +X tip
-        [9,0],[9,3],[9,4],[9,7],   // -X tip
-        [10,2],[10,3],[10,6],[10,7], // +Y tip
-        [11,0],[11,1],[11,4],[11,5], // -Y tip
-        [12,4],[12,5],[12,6],[12,7], // +Z tip
-        [13,0],[13,1],[13,2],[13,3], // -Z tip
-      ];
+      // 3D star: 5 outer points + 5 inner points, extruded front/back
+      const outerR = s * 1.0, innerR = s * 0.4, depth = s * 0.5;
+      const verts3D = [];
+      // front face star (z = -depth)
+      for (let i = 0; i < 10; i++) {
+        const angle = (i / 10) * Math.PI * 2 - Math.PI / 2;
+        const r = i % 2 === 0 ? outerR : innerR;
+        verts3D.push([r * Math.cos(angle), r * Math.sin(angle), -depth]);
+      }
+      // back face star (z = +depth)
+      for (let i = 0; i < 10; i++) {
+        const angle = (i / 10) * Math.PI * 2 - Math.PI / 2;
+        const r = i % 2 === 0 ? outerR : innerR;
+        verts3D.push([r * Math.cos(angle), r * Math.sin(angle), depth]);
+      }
 
-      // Rotate around Y then X slightly
-      const cosR2 = Math.cos(rot * 0.7), sinR2 = Math.sin(rot * 0.7);
+      // edges: front face, back face, connectors
+      const edges = [];
+      for (let i = 0; i < 10; i++) { edges.push([i, (i + 1) % 10]); }           // front
+      for (let i = 0; i < 10; i++) { edges.push([10 + i, 10 + (i + 1) % 10]); } // back
+      for (let i = 0; i < 10; i++) { edges.push([i, 10 + i]); }                  // sides
+
+      // Rotate around Y axis only (horizontal spin)
       const proj = verts3D.map(([x, y, z]) => {
         const rx = x * cosR + z * sinR;
-        const rz = -x * sinR + z * cosR;
-        const ry = y * cosR2 - rz * sinR2;
-        return [rx, ry];
+        return [rx, y];
       });
 
       // dynamic color — contrast against sky
@@ -2925,7 +3130,7 @@
     }
   }
 
-  // ---- ROLL POWERUP (barrel roll charge — 3D wireframe torus) ----
+  // ---- ROLL POWERUP (barrel roll charge — 3D wireframe extruded arrow) ----
   function drawRollPowerups() {
     for (const rp of rollPowerups) {
       if (rp.x < -60 || rp.x > W + 60) continue;
@@ -2942,49 +3147,43 @@
       const s = rp.size;
       const rot = rp.rot;
       const cosR = Math.cos(rot), sinR = Math.sin(rot);
-      const cosR2 = Math.cos(rot * 0.6), sinR2 = Math.sin(rot * 0.6);
 
-      // Torus: major radius R, minor radius r
-      const R = s * 0.55, r = s * 0.25;
-      const segsM = 10, segsT = 6;
-      // pre-compute vertex positions (flat array, 2 floats per vert)
-      const vertX = new Float32Array(segsM * segsT);
-      const vertY = new Float32Array(segsM * segsT);
-      for (let i = 0; i < segsM; i++) {
-        const theta = (i / segsM) * Math.PI * 2;
-        const ct = Math.cos(theta), st = Math.sin(theta);
-        for (let j = 0; j < segsT; j++) {
-          const phi = (j / segsT) * Math.PI * 2;
-          const cp = Math.cos(phi), sp = Math.sin(phi);
-          const x3 = (R + r * cp) * ct;
-          const y3 = r * sp;
-          const z3 = (R + r * cp) * st;
-          const rx = x3 * cosR + z3 * sinR;
-          const rz = -x3 * sinR + z3 * cosR;
-          const idx = i * segsT + j;
-          vertX[idx] = rx;
-          vertY[idx] = y3 * cosR2 - rz * sinR2;
-        }
-      }
+      // Arrow shape: 7 vertices forming a right-pointing arrow
+      const d = s * 0.5; // depth (half extrusion)
+      const arrow2D = [
+        [s * 0.7, 0],       // 0: tip (right)
+        [s * 0.1, -s * 0.5],  // 1: top of head
+        [s * 0.1, -s * 0.2],  // 2: inner top
+        [-s * 0.6, -s * 0.2], // 3: tail top
+        [-s * 0.6, s * 0.2],  // 4: tail bottom
+        [s * 0.1, s * 0.2],   // 5: inner bottom
+        [s * 0.1, s * 0.5],   // 6: bottom of head
+      ];
+
+      // Extrude: front face (z=-d) + back face (z=+d)
+      const verts3D = [];
+      for (const [x, y] of arrow2D) verts3D.push([x, y, -d]);
+      for (const [x, y] of arrow2D) verts3D.push([x, y, d]);
+      const n = arrow2D.length;
+
+      // Edges: front face, back face, side connectors
+      const edges = [];
+      for (let i = 0; i < n; i++) edges.push([i, (i + 1) % n]);
+      for (let i = 0; i < n; i++) edges.push([n + i, n + (i + 1) % n]);
+      for (let i = 0; i < n; i++) edges.push([i, n + i]);
+
+      // Rotate around Y axis only (horizontal spin)
+      const proj = verts3D.map(([x, y, z]) => [x * cosR + z * sinR, y]);
 
       // dynamic color — contrast against sky
-      const bgR = getSkyColorAt(rp.y);
-      const rollCol = contrastColor(0, 221, 255, bgR[0], bgR[1], bgR[2]);
+      const bgRc = getSkyColorAt(rp.y);
+      const rollCol = contrastColor(0, 221, 255, bgRc[0], bgRc[1], bgRc[2]);
       ctx.strokeStyle = rollCol;
       ctx.lineWidth = 1.2;
       ctx.beginPath();
-      for (let i = 0; i < segsM; i++) {
-        const ni = (i + 1) % segsM;
-        for (let j = 0; j < segsT; j++) {
-          const nj = (j + 1) % segsT;
-          const a = i * segsT + j;
-          const b = i * segsT + nj;
-          const c = ni * segsT + j;
-          ctx.moveTo(vertX[a], vertY[a]);
-          ctx.lineTo(vertX[b], vertY[b]);
-          ctx.moveTo(vertX[a], vertY[a]);
-          ctx.lineTo(vertX[c], vertY[c]);
-        }
+      for (const [a, b] of edges) {
+        ctx.moveTo(proj[a][0], proj[a][1]);
+        ctx.lineTo(proj[b][0], proj[b][1]);
       }
       ctx.stroke();
       ctx.restore();
@@ -3001,6 +3200,25 @@
       ctx.beginPath();
       ctx.arc(s.x, s.y, s.size * t, 0, Math.PI * 2);
       ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+
+  // ---- WIND GUST STREAKS ----
+  function drawGustStreaks() {
+    if (gustStreaks.length === 0) return;
+    ctx.save();
+    ctx.lineCap = 'round';
+    for (const s of gustStreaks) {
+      const t = s.life / s.maxLife;
+      ctx.globalAlpha = t * 0.6;
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1 + t;
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y);
+      ctx.lineTo(s.x + s.len * t, s.y);
+      ctx.stroke();
     }
     ctx.globalAlpha = 1;
     ctx.restore();
@@ -3089,11 +3307,9 @@
     ctx.moveTo(14, 0);                                              // beak tip
     ctx.quadraticCurveTo(10, -1.5, 4, -2);                          // head
     ctx.bezierCurveTo(-2, -2.8 + w * 0.15, -10, -6 + w, -20, -4.5 + w * 0.7); // upper wing crescent
-    ctx.quadraticCurveTo(-15, -2.5 + w * 0.2, -10, -1);            // wing trailing edge
-    ctx.lineTo(-14, -1.8);                                          // tail upper prong
-    ctx.lineTo(-11, 0);                                             // tail center
-    ctx.lineTo(-14, 1.8);                                           // tail lower prong
-    ctx.lineTo(-10, 1);                                             // tail return
+    ctx.quadraticCurveTo(-15, -2.5 + w * 0.2, -10, 0);             // wing trailing edge to center
+    ctx.lineTo(-10, 0);                                             // center join
+    // lower wing starts from same point
     ctx.quadraticCurveTo(-15, 2.5 - w * 0.2, -20, 4.5 - w * 0.7); // lower wing crescent
     ctx.bezierCurveTo(-10, 6 - w, -2, 2.8 - w * 0.15, 4, 2);      // lower wing return
     ctx.quadraticCurveTo(10, 1.5, 14, 0);                           // belly to beak
@@ -3106,9 +3322,7 @@
       ctx.globalAlpha = 0.6 + Math.sin(frameCount * 0.15) * 0.2;
       ctx.beginPath();
       ctx.moveTo(-10, -1);
-      ctx.lineTo(-16, -2.5);
-      ctx.lineTo(-12, 0);
-      ctx.lineTo(-16, 2.5);
+      ctx.lineTo(-18, 0);
       ctx.lineTo(-10, 1);
       ctx.closePath();
       ctx.fill();
@@ -3121,28 +3335,85 @@
   // No morph — launch spawns a particle burst and immediately switches to flight form
 
   let perchBlinkTimer = 0;
-  function drawPerchingBird() {
-    // draw poles and wires so bird is visibly perched on wire
-    drawPoles();
-    drawWires();
 
-    if (!perchedBirdLoaded) return;
-    const sh = 114;
-    const sw = sh * (748 / 1378); // preserve aspect ratio
+  // ---- CANVAS-DRAWN PERCH BIRD (body + separate head) ----
+  // All coordinates relative to wire contact point (0,0 = feet on wire)
+  // Neck pivot where head attaches to body
+  const NECK_PX = 1, NECK_PY = -38;
+
+  const PERCH_SCALE = 1.242;
+
+  function drawPerchBodyAt(ox, oy) {
     ctx.save();
-    ctx.translate(bird.x, bird.y);
-    ctx.drawImage(perchedBirdImg, -sw / 2, -sh + 54, sw, sh);
+    ctx.translate(ox, oy);
+    ctx.scale(PERCH_SCALE, PERCH_SCALE);
+    ctx.fillStyle = '#000';
+
+    // Solid body: neck-front → chest → belly → feet → rump → tail → back → neck
+    ctx.beginPath();
+    ctx.moveTo(-3, -38);
+    // chest (rounds out left)
+    ctx.bezierCurveTo(-14, -32, -16, -22, -14, -14);
+    // belly curves to feet
+    ctx.bezierCurveTo(-12, -6, -6, 0, -1, 2);
+    // feet on wire
+    ctx.lineTo(1, 2);
+    ctx.lineTo(3, 1);
+    // rump curves into back going up
+    ctx.bezierCurveTo(6, 0, 10, -6, 12, -14);
+    // back going up (smooth convex curve)
+    ctx.bezierCurveTo(14, -18, 14, -24, 12, -28);
+    // upper back to neck
+    ctx.bezierCurveTo(10, -34, 7, -38, 4, -38);
+    ctx.closePath();
+    ctx.fill();
+
     ctx.restore();
   }
 
-  function drawStaticPerchBird() {
-    if (perchBirdX < -50 || !perchedBirdLoaded) return;
-    const sh = 114;
-    const sw = sh * (748 / 1378);
+  function drawPerchHeadAt(ox, oy, angle) {
     ctx.save();
-    ctx.translate(perchBirdX, perchBirdY);
-    ctx.drawImage(perchedBirdImg, -sw / 2, -sh + 54, sw, sh);
+    ctx.translate(ox + NECK_PX * PERCH_SCALE, oy + NECK_PY * PERCH_SCALE);
+    ctx.scale(PERCH_SCALE, PERCH_SCALE);
+    ctx.rotate(angle);
+    ctx.fillStyle = '#000';
+
+    ctx.beginPath();
+    // start at bottom center
+    ctx.moveTo(0, 4);
+    // curve out to left neck and up
+    ctx.bezierCurveTo(-5, 6, -8, 4, -9, -2);
+    // left neck to back of head
+    ctx.bezierCurveTo(-10, -6, -9, -12, -6, -14);
+    // back of head dome
+    ctx.bezierCurveTo(-4, -16, 0, -17, 2, -16);
+    // crown curving to forehead
+    ctx.bezierCurveTo(6, -16, 9, -14, 10, -11);
+    // forehead to beak (long beak)
+    ctx.bezierCurveTo(12, -10, 16, -9, 20, -8);
+    // beak tip
+    ctx.lineTo(21, -7);
+    // under beak
+    ctx.lineTo(15, -6);
+    // chin
+    ctx.bezierCurveTo(10, -4, 7, -2, 6, 0);
+    // right neck curving down to bottom center
+    ctx.bezierCurveTo(6, 4, 5, 6, 0, 4);
+    ctx.closePath();
+    ctx.fill();
+
     ctx.restore();
+  }
+
+  function drawPerchingBird() {
+    drawPerchBodyAt(bird.x, bird.y);
+    drawPerchHeadAt(bird.x, bird.y, perchHeadAngle);
+  }
+
+  function drawStaticPerchBird() {
+    if (perchBirdX < -50) return;
+    drawPerchBodyAt(perchBirdX, perchBirdY);
+    drawPerchHeadAt(perchBirdX, perchBirdY, 0);
   }
 
   /* PAPER AIRPLANE (preserved for revert):
@@ -3179,9 +3450,37 @@
   //  UI
   // =========================================================
   function drawUI() {
-    if (state === STATE.HOME) { drawHomeScreen(); drawAchievementsIcon(); /* drawLeaderboardBtn(); */ drawZenToggle(); drawMusicToggle(); /* drawSkipButton(); */ return; }
+    if (state === STATE.HOME) {
+      // fade in from achievements closing
+      if (achTransDir === -1 && achTransition < 1) {
+        const t = achTransition;
+        const ease = t * (2 - t); // ease-out
+        ctx.save();
+        ctx.globalAlpha = ease;
+        ctx.translate((1 - ease) * -30, 0);
+        drawHomeScreen(); drawAchievementsIcon(); drawZenToggle(); drawMusicToggle();
+        ctx.restore();
+      } else {
+        drawHomeScreen(); drawAchievementsIcon(); /* drawLeaderboardBtn(); */ drawZenToggle(); drawMusicToggle(); /* drawSkipButton(); */
+      }
+      return;
+    }
     if (state === STATE.LEADERBOARD) { drawLeaderboardScreen(); drawMusicToggle(); /* drawSkipButton(); */ return; }
-    if (state === STATE.ACHIEVEMENTS) { drawAchievementsScreen(); drawMusicToggle(); /* drawSkipButton(); */ return; }
+    if (state === STATE.ACHIEVEMENTS) {
+      // fade/slide in from home
+      if (achTransDir === 1 && achTransition < 1) {
+        const t = achTransition;
+        const ease = t * (2 - t); // ease-out
+        ctx.save();
+        ctx.globalAlpha = ease;
+        ctx.translate((1 - ease) * 30, 0);
+        drawAchievementsScreen(); drawMusicToggle();
+        ctx.restore();
+      } else {
+        drawAchievementsScreen(); drawMusicToggle(); /* drawSkipButton(); */
+      }
+      return;
+    }
 
     drawDistanceDisplay();
     drawMusicToggle(); /* drawSkipButton(); */
@@ -3577,11 +3876,12 @@
   const _iconCvs = document.createElement('canvas');
   const _iconCtx = _iconCvs.getContext('2d');
 
-  function drawTintedIcon(img, loaded, x, y, size, hoverT, color) {
+  function drawTintedIcon(img, loaded, x, y, size, hoverT, color, baseAlpha) {
     if (!loaded) return;
     ctx.save();
     const fade = homePhase === 0 ? Math.min(homePhaseTimer / 50, 1) : Math.min(homePhaseTimer / 56, 1);
-    ctx.globalAlpha = (0.4 + hoverT * 0.6) * fade;
+    const a0 = baseAlpha != null ? baseAlpha : 0.4;
+    ctx.globalAlpha = (a0 + hoverT * (1 - a0)) * fade;
     const sc = 1 + hoverT * 0.05;
     ctx.translate(x, y);
     ctx.scale(sc, sc);
@@ -3602,7 +3902,7 @@
 
   function drawAchievementsIcon() {
     const t = medalHoverT;
-    drawTintedIcon(achIconImg, achIconLoaded, W - 40, 40, 33, t, '#FFF6C8');
+    drawTintedIcon(achIconImg, achIconLoaded, W - 40, 40, 36, t, '#ffffff', 1);
   }
 
   function drawLeaderboardBtn() {
@@ -3612,6 +3912,8 @@
 
   let achCardHovered = false;
   function drawAchievementsScreen() {
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fillRect(0, 0, W, H);
     achCardHovered = false;
 
     // back button (top-left): circle + left chevron
@@ -3675,20 +3977,20 @@
       const hovered = mouseX >= ax && mouseX <= ax + colW && mouseY >= ay && mouseY <= ay + cardH;
       if (hovered) achCardHovered = true;
 
-      const baseFill = 'rgba(255,246,200,';
       ctx.save();
 
       if (!unlocked && !hovered) ctx.globalAlpha = 0.6;
-      ctx.fillStyle = baseFill + (hovered ? (unlocked ? '0.31)' : '0.23)') : (unlocked ? '0.23)' : '0.18)'));
+      ctx.fillStyle = hovered ? 'rgba(255,255,255,0.45)' : (unlocked ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.25)');
       roundRect(ax, ay, colW, cardH, 13);
       ctx.fill();
 
-      // icon
+      // icon — colored on hover for unlocked achievements
       const cardMidY = ay + cardH / 2 + 1;
       const lockedHover = !unlocked && hovered;
+      const achColor = (unlocked && hovered) ? ACH_HOVER_COLOR : null;
       if (lockedHover) ctx.save();
       if (lockedHover) ctx.globalAlpha = 1;
-      drawAchievementIcon(ach.icon, ax + 31, cardMidY, 25, unlocked || lockedHover);
+      drawAchievementIcon(ach.icon, ax + 31, cardMidY, 25, unlocked || lockedHover, achColor);
 
       // text (+12px right of icon, +3px lower for vertical centering)
       ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
@@ -3704,8 +4006,8 @@
       if (unlocked) {
         const ckX = ax + colW - 36, ckY = cardMidY;
         ctx.save();
-        ctx.globalAlpha = 0.25;
-        ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.1;
+        ctx.globalAlpha = hovered ? 0.5 : 0.25;
+        ctx.strokeStyle = achColor || '#ffffff'; ctx.lineWidth = 1.1;
         ctx.beginPath();
         ctx.arc(ckX, ckY, 24, 0, Math.PI * 2);
         ctx.stroke();
@@ -3718,7 +4020,7 @@
           _iconCtx.clearRect(0, 0, s, s);
           _iconCtx.drawImage(medalImg, 0, 0, s, s);
           _iconCtx.globalCompositeOperation = 'source-in';
-          _iconCtx.fillStyle = '#fff';
+          _iconCtx.fillStyle = achColor || '#fff';
           _iconCtx.fillRect(0, 0, s, s);
           _iconCtx.globalCompositeOperation = 'source-over';
           ctx.drawImage(_iconCvs, ckX - iconSz / 2, ckY - iconSz / 2, iconSz, iconSz);
@@ -3902,7 +4204,9 @@
   }
 
   function drawRollTutorial() {
-    // no darkening overlay — text renders over live scene
+    // darkened overlay
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fillRect(0, 0, W, H);
     // instruction text — same style as home screen "Hold [space] to rise"
     ctx.globalAlpha = 0.8;
     ctx.fillStyle = '#FFF6C8';
@@ -3977,6 +4281,7 @@
   // ambient audio disabled
   // getSfx();
   // loadAmbientBuffers().then(() => startAmbientSounds());
+  loadWindSound();
   // window.addEventListener('click', function resumeAmbient() {
   //   getSfx().resume().then(() => { if (!ambientSource && state === STATE.HOME) startAmbientSounds(); });
   //   window.removeEventListener('click', resumeAmbient);
@@ -4029,6 +4334,11 @@
       canvas.style.cursor = 'pointer';
     } else {
       canvas.style.cursor = muteHovered ? 'pointer' : 'default';
+    }
+
+    // achievement page transition animation
+    if (achTransDir !== 0 && achTransition < 1) {
+      achTransition = Math.min(1, achTransition + dt * 0.06);
     }
 
     render();
