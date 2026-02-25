@@ -2404,7 +2404,7 @@
   function drawSky() {
     if (retroMode) {
       // Posterized sky: discrete horizontal color bands for retro look
-      const bands = 32;
+      const bands = 50;
       const bandH = Math.ceil(H / bands);
       for (let i = 0; i < bands; i++) {
         const y = i * bandH;
