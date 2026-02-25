@@ -1797,11 +1797,14 @@
     }
 
     // helper: check if y is blocked by obstacles or vertically stacked with existing items
-    function spawnYBlocked(y, margin) {
+    // collectibleMargin enforces strategic separation between collectibles
+    function spawnYBlocked(y, margin, collectibleMargin) {
       if (obstacles.some(ob => ob.x > W * 0.5 && Math.abs(ob.y - y) < margin)) return true;
-      if (hoops.some(h => h.x > W * 0.5 && Math.abs(h.y - y) < margin)) return true;
-      if (powerups.some(p => p.x > W * 0.5 && Math.abs(p.y - y) < margin)) return true;
-      if (shieldPowerups.some(p => !p.collected && p.x > W * 0.5 && Math.abs(p.y - y) < margin)) return true;
+      const cm = collectibleMargin || margin;
+      if (hoops.some(h => !h.collected && h.x > W * 0.5 && Math.abs(h.y - y) < cm)) return true;
+      if (powerups.some(p => !p.collected && p.x > W * 0.5 && Math.abs(p.y - y) < cm)) return true;
+      if (shieldPowerups.some(p => !p.collected && p.x > W * 0.5 && Math.abs(p.y - y) < cm)) return true;
+      if (rollPowerups.some(p => !p.collected && p.x > W * 0.5 && Math.abs(p.y - y) < cm)) return true;
       return false;
     }
 
@@ -1815,7 +1818,7 @@
         const count = 3 + Math.floor(Math.random() * 3);
         const hy = H * 0.15 + Math.random() * (H * 0.35);
         const spacing = 85 + Math.random() * 35;
-        if (!spawnYBlocked(hy, 70)) {
+        if (!spawnYBlocked(hy, 70, H * 0.25)) {
           hoopCooldown = 200 + count * 40;
           const syncRot = Math.random() * Math.PI * 2;
           const fid = nextFormationId++;
@@ -1842,7 +1845,7 @@
         for (let fi = 0; fi < count; fi++) {
           const t = fi / (count - 1);
           const ay = centerY - Math.sin(t * Math.PI) * arcHeight;
-          if (spawnYBlocked(ay, 50)) { blocked = true; break; }
+          if (spawnYBlocked(ay, 50, H * 0.25)) { blocked = true; break; }
         }
         if (!blocked) {
           hoopCooldown = 180 + count * 30;
@@ -1867,7 +1870,7 @@
         // normal single hoop
         let baseR = 22 + Math.random() * 34;
         const hy = H * 0.1 + Math.random() * (H * 0.45);
-        if (!spawnYBlocked(hy, 70)) {
+        if (!spawnYBlocked(hy, 70, H * 0.25)) {
           hoopCooldown = 80 + Math.random() * 70;
           const pts = baseR < 30 ? 50 : baseR < 44 ? 25 : 10;
           if (pts === 10) baseR *= 1.5625;
@@ -1975,7 +1978,7 @@
     if (powerupCooldown > 0) powerupCooldown -= dt;
     if (powerupCooldown <= 0 && Math.random() < 0.003 * dt) {
       const py = H * 0.12 + Math.random() * (H * 0.42);
-      if (!spawnYBlocked(py, 70)) {
+      if (!spawnYBlocked(py, 70, H * 0.25)) {
         powerupCooldown = 500 + Math.random() * 400;
         powerups.push({
           x: W + 30, y: py, size: 39, rot: 0, collected: false, collectTimer: 0,
@@ -2026,7 +2029,7 @@
       // ensure no other powerups or obstacles are nearby
       const sy = H * 0.12 + Math.random() * (H * 0.42);
       const tooClose = powerups.some(p => p.x > W * 0.5) || shieldPowerups.some(p => !p.collected && p.x > W * 0.3);
-      if (!tooClose && !spawnYBlocked(sy, 70)) {
+      if (!tooClose && !spawnYBlocked(sy, 70, H * 0.25)) {
         shieldCooldown = 800 + Math.random() * 600;
         shieldPowerups.push({
           x: W + 30,
@@ -2065,7 +2068,7 @@
     if (rollCooldown <= 0 && Math.random() < 0.002 * dt) {
       const ry = H * 0.12 + Math.random() * (H * 0.42);
       const tooClose = powerups.some(p => p.x > W * 0.5) || shieldPowerups.some(p => !p.collected && p.x > W * 0.3) || rollPowerups.some(p => !p.collected && p.x > W * 0.3);
-      if (!tooClose && !spawnYBlocked(ry, 70)) {
+      if (!tooClose && !spawnYBlocked(ry, 70, H * 0.25)) {
         rollCooldown = 700 + Math.random() * 400;
         rollPowerups.push({ x: W + 30, y: ry, size: 58, rot: Math.PI, collected: false, collectTimer: 0 });
       }
@@ -2395,6 +2398,18 @@
   }
 
   function drawSky() {
+    if (retroMode) {
+      // Posterized sky: discrete horizontal color bands for retro look
+      const bands = 36;
+      const bandH = Math.ceil(H / bands);
+      for (let i = 0; i < bands; i++) {
+        const y = i * bandH;
+        const midY = y + bandH / 2;
+        ctx.fillStyle = rgb(getSkyColorAt(midY));
+        ctx.fillRect(0, y, W, bandH);
+      }
+      return;
+    }
     const phase = (skyFrame / PHASE_DUR) % SKY.length;
     const idx = phase | 0, t = phase - idx, st = t * t * (3 - 2 * t);
     const a = SKY[idx], b = SKY[(idx + 1) % SKY.length];
