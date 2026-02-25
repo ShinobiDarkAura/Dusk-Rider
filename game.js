@@ -3608,6 +3608,13 @@
 
   function drawStaticPerchBird() {
     if (perchBirdX < -50) return;
+    if (retroPerchedLoaded) {
+      const h = 84;
+      const aspect = retroPerchedImg.naturalWidth / retroPerchedImg.naturalHeight;
+      const w = h * aspect;
+      ctx.drawImage(retroPerchedImg, perchBirdX - w / 2 - 36, perchBirdY - h + 30, w, h);
+      return;
+    }
     drawPerchBodyAt(perchBirdX, perchBirdY);
     drawPerchHeadAt(perchBirdX, perchBirdY, 0);
   }
