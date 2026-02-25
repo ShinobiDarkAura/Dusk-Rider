@@ -658,23 +658,26 @@
   function spawnCityShape(arr, x, layer) {
     if (layer === 'far') {
       const w = 20 + rng() * 60;
-      const h = 47 + rng() * 164;
+      const h = 200 + rng() * 120;
       arr.push({
         x, w, h, type: 'building', shape: 'building', style: rng(),
-        antenna: rng() < 0.25 ? 8 + rng() * 20 : 0,
+        antenna: 0,
         windows: null, // far layer: no lights
       });
-      return x + w + rng() * 10;
+      return x + w;
     }
-    const w = 30 + rng() * 80;
-    const h = (60 + rng() * 180) * 0.8;
+    const w = 25 + rng() * 90;
+    const h = 120 + rng() * 80;
+    const shortCount = arr.filter(b => b.angledRoof).length;
+    const isAngled = h < 100 && shortCount < 2 && rng() < 0.4;
     arr.push({
       x, w, h, type: 'building', shape: 'building', style: rng(),
-      antenna: rng() < 0.2 ? 10 + rng() * 25 : 0,
-      waterTower: w > 45 && h > 80 && rng() < 0.08,
+      antenna: 0,
+      angledRoof: isAngled ? (rng() < 0.5 ? 'left' : 'right') : null,
+      waterTower: w > 45 && h > 80 && !arr.some(b => b.waterTower) && rng() < 0.08,
       windows: makeWindows(w, h, 10, 14, 0.3),
     });
-    return x + w + rng() * 8;
+    return x + w - rng() * 3;
   }
 
   function spawnMountainShape(arr, x, layer) {
@@ -726,7 +729,7 @@
       side: 1, y: 0.3 + Math.random() * 0.3, len: 0.2 + Math.random() * 0.3,
     });
     arr.push({ x, w, h, type: 'cactus', arms, trunkW });
-    return x + 100 + Math.random() * 140;
+    return x + w - Math.random() * 3;
   }
 
   function spawnVolcanicShape(arr, x, layer) {
@@ -750,7 +753,7 @@
       columns: ruinType < 0.33 ? Math.floor(1 + Math.random() * 3) : 0,
       hasArch: ruinType >= 0.33 && ruinType < 0.66 && Math.random() < 0.3,
     });
-    return x + w + Math.random() * 20;
+    return x + w - Math.random() * 3;
   }
 
   function spawnSkylineShape(arr, x, layer) {
@@ -772,6 +775,7 @@
     while (skylineFarEdge < W + 300) {
       skylineFarEdge = spawnSkylineShape(skylineFar, skylineFarEdge, 'far');
     }
+    rng = mulberry32(137);
     while (skylineNearEdge < W + 300) {
       skylineNearEdge = spawnSkylineShape(skylineNear, skylineNearEdge, 'near');
     }
@@ -2400,7 +2404,7 @@
   function drawSky() {
     if (retroMode) {
       // Posterized sky: discrete horizontal color bands for retro look
-      const bands = 36;
+      const bands = 32;
       const bandH = Math.ceil(H / bands);
       for (let i = 0; i < bands; i++) {
         const y = i * bandH;
@@ -2495,6 +2499,8 @@
 
   // ---- CITY SKYLINE (no window lights) ----
   function drawSkyline() {
+    ctx.save();
+    ctx.translate(0, H * 0.06);
     ctx.fillStyle = '#000';
     ctx.globalAlpha = 0.35;
     for (const b of skylineFar) {
@@ -2506,6 +2512,7 @@
       if (b.x > W + 200 || b.x + b.w < -200) continue;
       drawSkylineShape(b);
     }
+    ctx.restore();
   }
 
   function drawSkylineShape(b) {
@@ -2523,14 +2530,32 @@
   function drawBuilding(b) {
     const top = H - b.h * 0.9;
     ctx.fillStyle = '#000';
+    if (b.angledRoof) {
+      const drop = b.w * 0.3;
+      ctx.beginPath();
+      if (b.angledRoof === 'left') {
+        ctx.moveTo(b.x, top + drop);
+        ctx.lineTo(b.x + b.w, top);
+        ctx.lineTo(b.x + b.w, top + b.h);
+        ctx.lineTo(b.x, top + b.h);
+      } else {
+        ctx.moveTo(b.x, top);
+        ctx.lineTo(b.x + b.w, top + drop);
+        ctx.lineTo(b.x + b.w, top + b.h);
+        ctx.lineTo(b.x, top + b.h);
+      }
+      ctx.closePath();
+      ctx.fill();
+    } else {
     ctx.fillRect(b.x, top, b.w, b.h);
-    if (b.style < 0.15) {
+    }
+    if (b.style < 0.15 && !b.angledRoof) {
       ctx.beginPath();
       ctx.moveTo(b.x, top);
       ctx.lineTo(b.x + b.w / 2, top - b.w * 0.4);
       ctx.lineTo(b.x + b.w, top);
       ctx.fill();
-    } else if (b.style < 0.3) {
+    } else if (b.style < 0.3 && !b.angledRoof) {
       const stepW = b.w * 0.6;
       const stepH = b.h * 0.12;
       ctx.fillRect(b.x + (b.w - stepW) / 2, top - stepH, stepW, stepH);
@@ -2887,7 +2912,7 @@
         const windOff = Math.sin(frameCount * 0.008 + p1.x * 0.003 + wdi * 1.5) * 2.5;
         const ctrlY = Math.max(y1, y2) + baseSag * wd.sagMul + windOff;
         ctx.strokeStyle = '#000';
-        ctx.lineWidth = wd.thick;
+        ctx.lineWidth = wd.thick + (retroMode ? 1 : 0);
         ctx.beginPath(); ctx.moveTo(p1.x, y1);
         ctx.quadraticCurveTo(midX, ctrlY, p2.x, y2); ctx.stroke();
       }
@@ -3865,8 +3890,7 @@
     ctx.globalAlpha = fade * (0.35 + zenT * 0.65);
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.font = `400 13px ${FONT}`;
-    const zg = Math.round(246 + zenT * 9), zb = Math.round(200 + zenT * 55);
-    ctx.fillStyle = `rgb(255,${zg},${zb})`;
+    ctx.fillStyle = '#FFF6C8';
     const tw = 22, th = 12, tr = 6;
     const textW = ctx.measureText('zen mode').width;
     const totalW = textW + 6 + tw;
@@ -3876,7 +3900,7 @@
     ctx.fillText('zen mode', startX, ty);
     // toggle indicator
     const ix = startX + textW + 6 + tw / 2, iy = ty;
-    ctx.strokeStyle = `rgb(255,${zg},${zb})`; ctx.lineWidth = 1;
+    ctx.strokeStyle = '#FFF6C8'; ctx.lineWidth = 1;
     roundRect(ix - tw / 2, iy - th / 2, tw, th, tr);
     ctx.stroke();
     // knob (slides smoothly)
@@ -3886,7 +3910,7 @@
     ctx.beginPath();
     ctx.arc(knobX, iy, 4, 0, Math.PI * 2);
     const knobAlpha = 0.6 + zenT * 0.4;
-    ctx.fillStyle = `rgba(255,${zg},${zb},${knobAlpha})`;
+    ctx.fillStyle = `rgba(255,246,200,${knobAlpha})`;
     ctx.fill();
     ctx.restore();
   }
@@ -3901,8 +3925,7 @@
     ctx.globalAlpha = fade * (0.35 + retroT * 0.65);
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.font = `400 13px ${FONT}`;
-    const rg = Math.round(200 + retroT * 55), rb = Math.round(246 + retroT * 9);
-    ctx.fillStyle = `rgb(${rg},255,${rb})`;
+    ctx.fillStyle = '#FFF6C8';
     const tw = 22, th = 12, tr = 6;
     const textW = ctx.measureText('retro').width;
     const totalW = textW + 6 + tw;
@@ -3911,7 +3934,7 @@
     ctx.textAlign = 'left';
     ctx.fillText('retro', startX, ty);
     const ix = startX + textW + 6 + tw / 2, iy = ty;
-    ctx.strokeStyle = `rgb(${rg},255,${rb})`; ctx.lineWidth = 1;
+    ctx.strokeStyle = '#FFF6C8'; ctx.lineWidth = 1;
     roundRect(ix - tw / 2, iy - th / 2, tw, th, tr);
     ctx.stroke();
     const offX = ix - tw / 2 + tr;
@@ -3920,7 +3943,7 @@
     ctx.beginPath();
     ctx.arc(knobX, iy, 4, 0, Math.PI * 2);
     const knobAlpha = 0.6 + retroT * 0.4;
-    ctx.fillStyle = `rgba(${rg},255,${rb},${knobAlpha})`;
+    ctx.fillStyle = `rgba(255,246,200,${knobAlpha})`;
     ctx.fill();
     ctx.restore();
   }
@@ -4165,7 +4188,7 @@
 
   function drawAchievementsIcon() {
     const t = medalHoverT;
-    drawTintedIcon(achIconImg, achIconLoaded, W - 40, 40, 36, t, '#ffffff', 1);
+    drawTintedIcon(achIconImg, achIconLoaded, W - 40, 40, 36, t, '#FFF6C8', 1);
   }
 
   function drawLeaderboardBtn() {
