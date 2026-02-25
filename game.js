@@ -38,6 +38,11 @@
   let perchedBirdLoaded = false;
   perchedBirdImg.onload = () => { perchedBirdLoaded = true; };
 
+  const retroPerchedImg = new Image();
+  retroPerchedImg.src = 'assets/perched.svg';
+  let retroPerchedLoaded = false;
+  retroPerchedImg.onload = () => { retroPerchedLoaded = true; };
+
 
   let W, H;
   const REF_H = 900;
@@ -260,6 +265,8 @@
   let titleHoverT = 0; // smooth hover transition for title (0→1)
   let zenMode = false; // zen mode — no death, fly forever
   let zenT = 0; // smooth transition for zen toggle (0→1)
+  let retroMode = false; // retro dither mode
+  let retroT = 0; // smooth transition for retro toggle (0→1)
   let barrelRolling = false;
   let barrelRollTimer = 0;
   const BARREL_ROLL_DUR = 36; // 0.6s at 60fps
@@ -285,6 +292,28 @@
   const lucideImgs = {};
   const _lucideCvs = document.createElement('canvas');
   const _lucideCtx = _lucideCvs.getContext('2d');
+
+  // Off-screen canvas for retro dither post-processing
+  const _retroCvs = document.createElement('canvas');
+  const _retroCtx = _retroCvs.getContext('2d');
+  // Off-screen canvas for saving 4x frame during UI 2x overlay pass
+  const _retro8xCvs = document.createElement('canvas');
+  const _retro8xCtx = _retro8xCvs.getContext('2d');
+  // Pre-generate 4x4 Bayer dither pattern tile
+  const _ditherCvs = document.createElement('canvas');
+  const _ditherCtx = _ditherCvs.getContext('2d');
+  _ditherCvs.width = 4; _ditherCvs.height = 4;
+  const _bayerMatrix = [0,8,2,10, 12,4,14,6, 3,11,1,9, 15,7,13,5];
+  const _ditherData = _ditherCtx.createImageData(4, 4);
+  for (let i = 0; i < 16; i++) {
+    const v = _bayerMatrix[i] < 8 ? 0 : 255;
+    _ditherData.data[i * 4] = v;
+    _ditherData.data[i * 4 + 1] = v;
+    _ditherData.data[i * 4 + 2] = v;
+    _ditherData.data[i * 4 + 3] = 255;
+  }
+  _ditherCtx.putImageData(_ditherData, 0, 0);
+  let _ditherPattern = null;
 
   // Build unique icon set from ACHIEVEMENTS + UI icons
   const lucideIconNames = [...new Set(ACHIEVEMENTS.map(a => a.icon)), 'volume-2', 'volume-x'];
@@ -386,7 +415,7 @@
     ambientSource.connect(hp);
     hp.connect(lp);
     lp.connect(ambientGain);
-    ambientGain.connect(ac.destination);
+    ambientGain.connect(getAudioDest());
     ambientGain.gain.setValueAtTime(0, ac.currentTime);
     ambientGain.gain.linearRampToValueAtTime(0.09, ac.currentTime + 2.5);
     ambientSource.start(0);
@@ -409,11 +438,11 @@
     const src = ac.createBufferSource();
     const gain = ac.createGain();
     src.buffer = windBuffer;
-    // slow playback to stretch duration by ~0.5s
+    // slow playback to stretch duration by ~1.5s
     const dur = windBuffer.duration;
-    src.playbackRate.value = dur / (dur + 0.5);
+    src.playbackRate.value = dur / (dur + 1.5);
     src.connect(gain);
-    gain.connect(ac.destination);
+    gain.connect(getAudioDest());
     gain.gain.setValueAtTime(0.21, ac.currentTime);
     src.start(0);
   }
@@ -774,10 +803,62 @@
   // =========================================================
   let audioStarted = false;
   let bgMusic = null;
+  let _bgMusicNormal = null;
+  let _bgMusicRetro = null;
   let sfxCtx = null;
   function getSfx() {
     if (!sfxCtx) sfxCtx = new (window.AudioContext || window.webkitAudioContext)();
     return sfxCtx;
+  }
+
+  // Retro audio filter chain (lowpass only — no waveshaper to avoid hiss)
+  let _retroMaster = null;   // master gain all sounds route to
+  let _retroLowpass = null;  // lowpass filter (muffled speaker)
+  let _retroDry = null;      // direct connection (bypass)
+
+  function initRetroAudio() {
+    const ac = getSfx();
+    _retroMaster = ac.createGain();
+    _retroLowpass = ac.createBiquadFilter();
+    _retroLowpass.type = 'lowpass';
+    _retroLowpass.frequency.value = 3500;
+    _retroLowpass.Q.value = 0.3;
+    // default: dry path (no retro)
+    _retroDry = ac.createGain();
+    _retroMaster.connect(_retroDry);
+    _retroDry.connect(ac.destination);
+  }
+
+  function updateRetroAudio() {
+    if (!_retroMaster) return;
+    const ac = getSfx();
+    // SFX filter chain (lowpass only)
+    _retroMaster.disconnect();
+    _retroLowpass.disconnect();
+    _retroDry.disconnect();
+    if (retroMode) {
+      _retroMaster.connect(_retroLowpass);
+      _retroLowpass.connect(ac.destination);
+    } else {
+      _retroMaster.connect(_retroDry);
+      _retroDry.connect(ac.destination);
+    }
+    // Swap music track
+    if (_bgMusicNormal && _bgMusicRetro) {
+      const from = retroMode ? _bgMusicNormal : _bgMusicRetro;
+      const to = retroMode ? _bgMusicRetro : _bgMusicNormal;
+      const wasPlaying = !from.paused;
+      to.currentTime = from.currentTime;
+      to.volume = from.volume || 0.25;
+      from.pause();
+      bgMusic = to;
+      if (wasPlaying && musicOn) to.play().catch(() => {});
+    }
+  }
+
+  function getAudioDest() {
+    if (!_retroMaster) initRetroAudio();
+    return _retroMaster;
   }
 
   let hoopFlourishTimer = null;
@@ -791,7 +872,7 @@
     [523, 659, 784, 988, 1175].forEach((freq, i) => {
       const osc = ac.createOscillator();
       const gain = ac.createGain();
-      osc.connect(gain); gain.connect(ac.destination);
+      osc.connect(gain); gain.connect(getAudioDest());
       osc.type = 'sine';
       const st = t + i * 0.06;
       osc.frequency.setValueAtTime(freq, st);
@@ -813,7 +894,7 @@
       const root = chord[idx];
       const osc = ac.createOscillator();
       const gain = ac.createGain();
-      osc.connect(gain); gain.connect(ac.destination);
+      osc.connect(gain); gain.connect(getAudioDest());
       osc.type = 'sine';
       osc.frequency.setValueAtTime(root, t);
       gain.gain.setValueAtTime(0.09, t);
@@ -822,7 +903,7 @@
       // soft fifth harmonic for warmth
       const h1 = ac.createOscillator();
       const h1g = ac.createGain();
-      h1.connect(h1g); h1g.connect(ac.destination);
+      h1.connect(h1g); h1g.connect(getAudioDest());
       h1.type = 'sine';
       h1.frequency.setValueAtTime(root * 1.5, t);
       h1g.gain.setValueAtTime(0.025, t);
@@ -835,7 +916,7 @@
       [root, root * 1.25, root * 1.5].forEach((freq, i) => {
         const osc = ac.createOscillator();
         const gain = ac.createGain();
-        osc.connect(gain); gain.connect(ac.destination);
+        osc.connect(gain); gain.connect(getAudioDest());
         osc.type = 'sine';
         const st = t + i * 0.06;
         osc.frequency.setValueAtTime(freq, st);
@@ -854,7 +935,7 @@
     // warm soft "pop" — two sine tones a fifth apart
     const osc1 = ac.createOscillator();
     const g1 = ac.createGain();
-    osc1.connect(g1); g1.connect(ac.destination);
+    osc1.connect(g1); g1.connect(getAudioDest());
     osc1.type = 'sine';
     osc1.frequency.setValueAtTime(440, t);
     g1.gain.setValueAtTime(0.036, t);
@@ -863,7 +944,7 @@
 
     const osc2 = ac.createOscillator();
     const g2 = ac.createGain();
-    osc2.connect(g2); g2.connect(ac.destination);
+    osc2.connect(g2); g2.connect(getAudioDest());
     osc2.type = 'sine';
     osc2.frequency.setValueAtTime(660, t + 0.02);
     g2.gain.setValueAtTime(0.024, t + 0.02);
@@ -881,7 +962,7 @@
     for (let i = 0; i < notes.length; i++) {
       const osc = ac.createOscillator();
       const g = ac.createGain();
-      osc.connect(g); g.connect(ac.destination);
+      osc.connect(g); g.connect(getAudioDest());
       osc.type = 'sine';
       const start = t + i * step;
       osc.frequency.setValueAtTime(notes[i], start);
@@ -903,7 +984,7 @@
     for (let i = 0; i < notes.length; i++) {
       const osc = ac.createOscillator();
       const g = ac.createGain();
-      osc.connect(g); g.connect(ac.destination);
+      osc.connect(g); g.connect(getAudioDest());
       osc.type = 'sine';
       const start = t + i * step;
       osc.frequency.setValueAtTime(notes[i], start);
@@ -925,7 +1006,7 @@
     for (let i = 0; i < notes.length; i++) {
       const osc = ac.createOscillator();
       const g = ac.createGain();
-      osc.connect(g); g.connect(ac.destination);
+      osc.connect(g); g.connect(getAudioDest());
       osc.type = 'sine';
       const start = t + i * step;
       osc.frequency.setValueAtTime(notes[i], start);
@@ -947,7 +1028,7 @@
     for (let i = 0; i < notes.length; i++) {
       const osc = ac.createOscillator();
       const g = ac.createGain();
-      osc.connect(g); g.connect(ac.destination);
+      osc.connect(g); g.connect(getAudioDest());
       osc.type = 'sine';
       const start = t + i * step;
       osc.frequency.setValueAtTime(notes[i], start);
@@ -966,7 +1047,7 @@
     // softer, lower pop — two tones a major third apart
     const osc1 = ac.createOscillator();
     const g1 = ac.createGain();
-    osc1.connect(g1); g1.connect(ac.destination);
+    osc1.connect(g1); g1.connect(getAudioDest());
     osc1.type = 'sine';
     osc1.frequency.setValueAtTime(330, t);
     g1.gain.setValueAtTime(0.03, t);
@@ -975,7 +1056,7 @@
 
     const osc2 = ac.createOscillator();
     const g2 = ac.createGain();
-    osc2.connect(g2); g2.connect(ac.destination);
+    osc2.connect(g2); g2.connect(getAudioDest());
     osc2.type = 'sine';
     osc2.frequency.setValueAtTime(415, t + 0.03);
     g2.gain.setValueAtTime(0.021, t + 0.03);
@@ -989,7 +1070,7 @@
     [262, 330, 392, 440].forEach((freq, i) => {
       const osc = ac.createOscillator();
       const gain = ac.createGain();
-      osc.connect(gain); gain.connect(ac.destination);
+      osc.connect(gain); gain.connect(getAudioDest());
       osc.type = 'sine';
       const t = ac.currentTime + i * 0.09;
       osc.frequency.setValueAtTime(freq, t);
@@ -1008,7 +1089,7 @@
     [392, 494, 587, 784].forEach((freq, i) => {
       const osc = ac.createOscillator();
       const gain = ac.createGain();
-      osc.connect(gain); gain.connect(ac.destination);
+      osc.connect(gain); gain.connect(getAudioDest());
       osc.type = 'sine';
       const t = ac.currentTime + i * 0.07;
       osc.frequency.setValueAtTime(freq, t);
@@ -1034,7 +1115,7 @@
     g1.gain.setValueAtTime(0.06, t);
     g1.gain.linearRampToValueAtTime(0.08, t + 0.15);
     g1.gain.exponentialRampToValueAtTime(0.001, t + 1.5);
-    o1.connect(g1); g1.connect(ac.destination);
+    o1.connect(g1); g1.connect(getAudioDest());
     o1.start(t); o1.stop(t + 1.55);
     // 2) soft filtered noise — airy wash
     const buf = ac.createBuffer(1, ac.sampleRate * 1.7, ac.sampleRate);
@@ -1052,7 +1133,7 @@
     ng.gain.setValueAtTime(0.04, t);
     ng.gain.linearRampToValueAtTime(0.06, t + 0.15);
     ng.gain.exponentialRampToValueAtTime(0.001, t + 1.5);
-    noise.connect(lp); lp.connect(ng); ng.connect(ac.destination);
+    noise.connect(lp); lp.connect(ng); ng.connect(getAudioDest());
     noise.start(t); noise.stop(t + 1.6);
     // 3) shimmer overtone — gentle fifth that fades in then out
     const o2 = ac.createOscillator();
@@ -1063,7 +1144,7 @@
     g2.gain.setValueAtTime(0.001, t);
     g2.gain.linearRampToValueAtTime(0.035, t + 0.25);
     g2.gain.exponentialRampToValueAtTime(0.001, t + 1.4);
-    o2.connect(g2); g2.connect(ac.destination);
+    o2.connect(g2); g2.connect(getAudioDest());
     o2.start(t); o2.stop(t + 1.45);
     // 4) sub-bass thud for weight
     const o3 = ac.createOscillator();
@@ -1072,7 +1153,7 @@
     o3.frequency.value = 65;
     g3.gain.setValueAtTime(0.07, t);
     g3.gain.exponentialRampToValueAtTime(0.001, t + 0.9);
-    o3.connect(g3); g3.connect(ac.destination);
+    o3.connect(g3); g3.connect(getAudioDest());
     o3.start(t); o3.stop(t + 0.95);
   }
 
@@ -1083,7 +1164,7 @@
     [262, 330, 392, 523].forEach((freq, i) => {
       const osc = ac.createOscillator();
       const gain = ac.createGain();
-      osc.connect(gain); gain.connect(ac.destination);
+      osc.connect(gain); gain.connect(getAudioDest());
       osc.type = 'triangle';
       const t = ac.currentTime + i * 0.05;
       osc.frequency.setValueAtTime(freq, t);
@@ -1098,9 +1179,21 @@
     if (audioStarted) return;
     audioStarted = true;
     getSfx(); // warm up audio context
-    bgMusic = new Audio('music.m4a');
-    bgMusic.loop = true;
-    bgMusic.volume = 0.25;
+    const ac = getSfx();
+    // normal music
+    _bgMusicNormal = new Audio('music.m4a');
+    _bgMusicNormal.loop = true;
+    _bgMusicNormal.volume = 0.25;
+    const normalSrc = ac.createMediaElementSource(_bgMusicNormal);
+    normalSrc.connect(ac.destination);
+    // retro music (pre-processed chiptune version)
+    _bgMusicRetro = new Audio('music.wav');
+    _bgMusicRetro.loop = true;
+    _bgMusicRetro.volume = 0.25;
+    const retroSrc = ac.createMediaElementSource(_bgMusicRetro);
+    retroSrc.connect(ac.destination);
+    // start with normal
+    bgMusic = retroMode ? _bgMusicRetro : _bgMusicNormal;
     // don't auto-play — music starts when the run begins
   }
 
@@ -1196,6 +1289,9 @@
     generateClouds();
 
     if (bgMusic) { bgMusic.pause(); bgMusic.currentTime = 0; }
+    // also reset the inactive music track
+    const inactive = (bgMusic === _bgMusicNormal) ? _bgMusicRetro : _bgMusicNormal;
+    if (inactive) { inactive.pause(); inactive.currentTime = 0; }
   }
 
 
@@ -1432,8 +1528,10 @@
 
     if (state === STATE.HOME) {
       startAudio();
+      // Retro toggle click (above zen)
+      if (mx > W / 2 - 40 && mx < W / 2 + 40 && my > H - 62 && my < H - 40) { playZenToggle(); retroMode = !retroMode; updateRetroAudio(); return; }
       // Zen toggle click (bottom-center)
-      if (mx > W / 2 - 40 && mx < W / 2 + 40 && my > H - 48) { playZenToggle(); zenMode = !zenMode; return; }
+      if (mx > W / 2 - 40 && mx < W / 2 + 40 && my > H - 40) { playZenToggle(); zenMode = !zenMode; return; }
       // Achievements icon click (top-right) — works in both phases
       if (mx > W - 68 && my < 58) { playUIClick(); state = STATE.ACHIEVEMENTS; achTransition = 0; achTransDir = 1; return; }
       // // Leaderboard icon click (below achievements icon) — works in both phases
@@ -1620,15 +1718,19 @@
       gustSpeedMult *= 1.1;
       gustTimer = 60;
       playWindGust();
-      // spawn wind streaks behind bird
-      for (let i = 0; i < 20; i++) {
+      // spawn wind streaks across entire left edge
+      for (let i = 0; i < 40; i++) {
+        const life = 70 + Math.random() * 40;
         gustStreaks.push({
-          x: bird.x - 10 - Math.random() * 30,
-          y: bird.y + (Math.random() - 0.5) * 80,
-          vx: -(4 + Math.random() * 8),
-          len: 30 + Math.random() * 50,
-          life: 40 + Math.random() * 20,
-          maxLife: 40 + Math.random() * 20,
+          x: -Math.random() * 60,
+          y: Math.random() * H,
+          vx: 6 + Math.random() * 10,
+          len: 60 + Math.random() * 100,
+          life: life,
+          maxLife: life,
+          waveAmp: 2 + Math.random() * 4,
+          waveFreq: 0.03 + Math.random() * 0.02,
+          wavePhase: Math.random() * Math.PI * 2,
         });
       }
     }
@@ -1637,8 +1739,9 @@
     for (let i = gustStreaks.length - 1; i >= 0; i--) {
       const s = gustStreaks[i];
       s.x += s.vx * dt;
+      s.wavePhase += s.waveFreq * dt;
       s.life -= dt;
-      if (s.life <= 0 || s.x + s.len < -50) { gustStreaks.splice(i, 1); }
+      if (s.life <= 0 || s.x > W + 200) { gustStreaks.splice(i, 1); }
     }
 
     // poles
@@ -1774,7 +1877,7 @@
             x: W + baseR + 20, y: hy,
             radius: baseR, pts,
             rot: Math.random() * Math.PI * 2,
-            color: pts === 50 ? '#e8a835' : pts === 25 ? '#44bbff' : '#00ff88',
+            color: pts === 50 ? '#e8a835' : pts === 25 ? '#ff55dd' : '#00ff88',
             collected: false, collectTimer: 0,
           });
         }
@@ -1928,7 +2031,7 @@
         shieldPowerups.push({
           x: W + 30,
           y: sy,
-          size: 37,
+          size: 46,
           rot: 0,
           collected: false,
           collectTimer: 0,
@@ -1964,7 +2067,7 @@
       const tooClose = powerups.some(p => p.x > W * 0.5) || shieldPowerups.some(p => !p.collected && p.x > W * 0.3) || rollPowerups.some(p => !p.collected && p.x > W * 0.3);
       if (!tooClose && !spawnYBlocked(ry, 70)) {
         rollCooldown = 700 + Math.random() * 400;
-        rollPowerups.push({ x: W + 30, y: ry, size: 46, rot: Math.PI, collected: false, collectTimer: 0 });
+        rollPowerups.push({ x: W + 30, y: ry, size: 58, rot: Math.PI, collected: false, collectTimer: 0 });
       }
     }
     for (let i = rollPowerups.length - 1; i >= 0; i--) {
@@ -2194,7 +2297,29 @@
     drawCelestial();
     // drawClouds(); // disabled for FPS
     if (lightningFlash > 0) drawLightning();
-    drawSkyline();
+
+    // --- retro: pre-pixelate sky+skyline at 8x for chunky background ---
+    if (retroMode) {
+      drawSkyline();
+      const dpr = window.devicePixelRatio || 1;
+      const pw = canvas.width, ph = canvas.height;
+      const skyScale = 8;
+      const sw = Math.ceil(pw / skyScale), sh = Math.ceil(ph / skyScale);
+      _retroCvs.width = sw; _retroCvs.height = sh;
+      _retroCtx.drawImage(canvas, 0, 0, sw, sh);
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.imageSmoothingEnabled = false;
+      ctx.clearRect(0, 0, pw, ph);
+      ctx.drawImage(_retroCvs, 0, 0, pw, ph);
+      ctx.imageSmoothingEnabled = true;
+      ctx.restore();
+      ctx.setTransform(dpr * uiScale, 0, 0, dpr * uiScale, 0, 0);
+      if (shakeTimer > 0) ctx.translate(shakeX, shakeY);
+    } else {
+      drawSkyline();
+    }
+
     drawAmbientLife();
     if (state === STATE.HOME || state === STATE.ACHIEVEMENTS || state === STATE.LEADERBOARD) {
       drawPoles();
@@ -2221,6 +2346,52 @@
     drawVignette();
     ctx.restore();
     drawUI();
+
+    // --- retro dither post-processing ---
+    if (retroMode) {
+      const dpr = window.devicePixelRatio || 1;
+      const pw = canvas.width, ph = canvas.height;
+
+      // 4x downsample/upsample everything (point-sample to preserve 8x blocks)
+      const scale = 4;
+      const rw = Math.ceil(pw / scale), rh = Math.ceil(ph / scale);
+      _retroCvs.width = rw; _retroCvs.height = rh;
+      _retroCtx.imageSmoothingEnabled = false;
+      _retroCtx.drawImage(canvas, 0, 0, rw, rh);
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.imageSmoothingEnabled = false;
+      ctx.clearRect(0, 0, pw, ph);
+      ctx.drawImage(_retroCvs, 0, 0, pw, ph);
+
+      // Save 4x result, redraw UI at 2x for legibility
+      _retro8xCvs.width = pw; _retro8xCvs.height = ph;
+      _retro8xCtx.drawImage(canvas, 0, 0);
+      ctx.clearRect(0, 0, pw, ph);
+      ctx.setTransform(dpr * uiScale, 0, 0, dpr * uiScale, 0, 0);
+      drawUI();
+      // 2x downsample/upsample the UI overlay
+      const tw = Math.ceil(pw / 2), th = Math.ceil(ph / 2);
+      _retroCvs.width = tw; _retroCvs.height = th;
+      _retroCtx.drawImage(canvas, 0, 0, tw, th);
+      // Restore 4x frame, composite 2x UI on top
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, pw, ph);
+      ctx.drawImage(_retro8xCvs, 0, 0);
+      ctx.drawImage(_retroCvs, 0, 0, pw, ph);
+
+      // overlay dither pattern
+      if (!_ditherPattern) _ditherPattern = ctx.createPattern(_ditherCvs, 'repeat');
+      ctx.globalAlpha = 0.06;
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.fillStyle = _ditherPattern;
+      ctx.fillRect(0, 0, pw, ph);
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1;
+      ctx.imageSmoothingEnabled = true;
+      ctx.restore();
+      ctx.setTransform(dpr * uiScale, 0, 0, dpr * uiScale, 0, 0);
+    }
   }
 
   function drawSky() {
@@ -2949,14 +3120,8 @@
       const r = R * 0.12;
       const rot = h.rot;
 
-      // dynamic hoop color — contrast against sky at hoop's Y position
-      const baseCol = h.color;
-      const hr = parseInt(baseCol.slice(1, 3), 16);
-      const hg = parseInt(baseCol.slice(3, 5), 16);
-      const hb = parseInt(baseCol.slice(5, 7), 16);
-      const bg = getSkyColorAt(h.y);
-      const hoopCol = contrastColor(hr, hg, hb, bg[0], bg[1], bg[2]);
-      ctx.strokeStyle = hoopCol;
+      // consistent hoop color from spawn
+      ctx.strokeStyle = h.color;
       ctx.lineWidth = 1.5;
 
       // Longitude lines (circles tracing the ring at different tube offsets)
@@ -3002,7 +3167,7 @@
       ctx.fillStyle = '#000';
       ctx.fillText(h.pts, 1, 1);
       ctx.globalAlpha = alpha;
-      ctx.fillStyle = hoopCol;
+      ctx.fillStyle = h.color;
       ctx.fillText(h.pts, 0, 0);
 
       ctx.restore();
@@ -3120,6 +3285,7 @@
       // dynamic color — contrast against sky
       const bgS = getSkyColorAt(sp.y);
       const shieldCol = contrastColor(255, 255, 255, bgS[0], bgS[1], bgS[2]);
+
       ctx.strokeStyle = shieldCol;
       ctx.lineWidth = 1.2;
 
@@ -3181,6 +3347,7 @@
       // dynamic color — contrast against sky
       const bgRc = getSkyColorAt(rp.y);
       const rollCol = contrastColor(0, 221, 255, bgRc[0], bgRc[1], bgRc[2]);
+
       ctx.strokeStyle = rollCol;
       ctx.lineWidth = 1.2;
       ctx.beginPath();
@@ -3212,16 +3379,35 @@
   function drawGustStreaks() {
     if (gustStreaks.length === 0) return;
     ctx.save();
-    ctx.lineCap = 'round';
+    ctx.fillStyle = '#fff';
     for (const s of gustStreaks) {
       const t = s.life / s.maxLife;
-      ctx.globalAlpha = t * 0.6;
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 1 + t;
+      ctx.globalAlpha = t * 0.45;
+      const len = s.len * Math.min(t * 2, 1);
+      const segs = 16;
+      // draw tapered wavy shape — thick center, pointed ends
       ctx.beginPath();
-      ctx.moveTo(s.x, s.y);
-      ctx.lineTo(s.x + s.len * t, s.y);
-      ctx.stroke();
+      for (let i = 0; i <= segs; i++) {
+        const p = i / segs;
+        const px = s.x + p * len;
+        // taper: 0 at ends, max at center (sine envelope)
+        const thickness = Math.sin(p * Math.PI) * (2.5 + t * 2);
+        const wave = Math.sin(s.wavePhase + p * 6) * s.waveAmp * Math.sin(p * Math.PI);
+        const py = s.y + wave - thickness;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      // return along bottom edge
+      for (let i = segs; i >= 0; i--) {
+        const p = i / segs;
+        const px = s.x + p * len;
+        const thickness = Math.sin(p * Math.PI) * (2.5 + t * 2);
+        const wave = Math.sin(s.wavePhase + p * 6) * s.waveAmp * Math.sin(p * Math.PI);
+        const py = s.y + wave + thickness;
+        ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fill();
     }
     ctx.globalAlpha = 1;
     ctx.restore();
@@ -3355,19 +3541,19 @@
     // Solid body: neck-front → chest → belly → feet → rump → tail → back → neck
     ctx.beginPath();
     ctx.moveTo(-3, -38);
-    // chest (rounds out left)
-    ctx.bezierCurveTo(-14, -32, -16, -22, -14, -14);
+    // chest
+    ctx.bezierCurveTo(-12, -32, -14, -22, -12, -14);
     // belly curves to feet
-    ctx.bezierCurveTo(-12, -6, -6, 0, -1, 2);
+    ctx.bezierCurveTo(-10, -6, -5, 0, -1, 2);
     // feet on wire
     ctx.lineTo(1, 2);
     ctx.lineTo(3, 1);
     // rump curves into back going up
-    ctx.bezierCurveTo(6, 0, 10, -6, 12, -14);
+    ctx.bezierCurveTo(5, 0, 9, -6, 11, -14);
     // back going up (smooth convex curve)
-    ctx.bezierCurveTo(14, -18, 14, -24, 12, -28);
+    ctx.bezierCurveTo(12, -18, 12, -24, 11, -28);
     // upper back to neck
-    ctx.bezierCurveTo(10, -34, 7, -38, 4, -38);
+    ctx.bezierCurveTo(9, -34, 6, -38, 4, -38);
     ctx.closePath();
     ctx.fill();
 
@@ -3409,6 +3595,13 @@
   }
 
   function drawPerchingBird() {
+    if (retroPerchedLoaded) {
+      const h = 84;
+      const aspect = retroPerchedImg.naturalWidth / retroPerchedImg.naturalHeight;
+      const w = h * aspect;
+      ctx.drawImage(retroPerchedImg, bird.x - w / 2 - 36, bird.y - h + 30, w, h);
+      return;
+    }
     drawPerchBodyAt(bird.x, bird.y);
     drawPerchHeadAt(bird.x, bird.y, perchHeadAngle);
   }
@@ -3461,10 +3654,10 @@
         ctx.save();
         ctx.globalAlpha = ease;
         ctx.translate((1 - ease) * -30, 0);
-        drawHomeScreen(); drawAchievementsIcon(); drawZenToggle(); drawMusicToggle();
+        drawHomeScreen(); drawAchievementsIcon(); drawZenToggle(); drawRetroToggle(); drawMusicToggle();
         ctx.restore();
       } else {
-        drawHomeScreen(); drawAchievementsIcon(); /* drawLeaderboardBtn(); */ drawZenToggle(); drawMusicToggle(); /* drawSkipButton(); */
+        drawHomeScreen(); drawAchievementsIcon(); /* drawLeaderboardBtn(); */ drawZenToggle(); drawRetroToggle(); drawMusicToggle(); /* drawSkipButton(); */
       }
       return;
     }
@@ -3676,6 +3869,40 @@
     ctx.restore();
   }
 
+  function drawRetroToggle() {
+    retroT += ((retroMode ? 1 : 0) - retroT) * 0.12;
+    if (retroT < 0.01) retroT = 0;
+    if (retroT > 0.99) retroT = 1;
+
+    const fade = homePhase === 0 ? Math.min(homePhaseTimer / 50, 1) : Math.min(homePhaseTimer / 56, 1);
+    ctx.save();
+    ctx.globalAlpha = fade * (0.35 + retroT * 0.65);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = `400 13px ${FONT}`;
+    const rg = Math.round(200 + retroT * 55), rb = Math.round(246 + retroT * 9);
+    ctx.fillStyle = `rgb(${rg},255,${rb})`;
+    const tw = 22, th = 12, tr = 6;
+    const textW = ctx.measureText('retro').width;
+    const totalW = textW + 6 + tw;
+    const startX = W / 2 - totalW / 2;
+    const ty = H - 50;
+    ctx.textAlign = 'left';
+    ctx.fillText('retro', startX, ty);
+    const ix = startX + textW + 6 + tw / 2, iy = ty;
+    ctx.strokeStyle = `rgb(${rg},255,${rb})`; ctx.lineWidth = 1;
+    roundRect(ix - tw / 2, iy - th / 2, tw, th, tr);
+    ctx.stroke();
+    const offX = ix - tw / 2 + tr;
+    const onX = ix + tw / 2 - tr;
+    const knobX = offX + (onX - offX) * retroT;
+    ctx.beginPath();
+    ctx.arc(knobX, iy, 4, 0, Math.PI * 2);
+    const knobAlpha = 0.6 + retroT * 0.4;
+    ctx.fillStyle = `rgba(${rg},255,${rb},${knobAlpha})`;
+    ctx.fill();
+    ctx.restore();
+  }
+
   function drawLeaderboardIcon(x, y, size, alpha) {
     ctx.save();
     ctx.translate(x, y);
@@ -3717,6 +3944,17 @@
       ctx.translate(-W / 2, -tY);
       ctx.fillText('Dusk Rider', W / 2, tY);
       ctx.restore();
+      // "1997" subtitle when retro mode is on
+      if (retroT > 0.01) {
+        ctx.save();
+        ctx.globalAlpha = titleFade * retroT;
+        ctx.font = `400 22px sans-serif`;
+        ctx.fillStyle = '#FFF6C8';
+        ctx.translate(W / 2, tY + 96);
+        ctx.scale(retroT, retroT);
+        ctx.fillText('1997', 0, 0);
+        ctx.restore();
+      }
       ctx.globalAlpha = 1;
     } else {
       // fading title overlay during transition
@@ -4041,7 +4279,7 @@
     [523, 659, 784].forEach((freq, i) => {
       const osc = ac.createOscillator();
       const gain = ac.createGain();
-      osc.connect(gain); gain.connect(ac.destination);
+      osc.connect(gain); gain.connect(getAudioDest());
       osc.type = 'sine';
       const t = ac.currentTime + i * 0.08;
       osc.frequency.setValueAtTime(freq, t);
@@ -4332,8 +4570,9 @@
     if (state === STATE.PLAY) {
       canvas.style.cursor = 'default';
     } else if (state === STATE.HOME) {
-      const zenHovered = mouseX > W / 2 - 40 && mouseX < W / 2 + 40 && mouseY > H - 48;
-      canvas.style.cursor = (medalHovered || lbBtnHovered || zenHovered || muteHovered || (homePhase === 0 && titleHoverT > 0.1)) ? 'pointer' : 'default';
+      const zenHovered = mouseX > W / 2 - 40 && mouseX < W / 2 + 40 && mouseY > H - 40;
+      const retroHovered = mouseX > W / 2 - 40 && mouseX < W / 2 + 40 && mouseY > H - 62 && mouseY < H - 40;
+      canvas.style.cursor = (medalHovered || lbBtnHovered || zenHovered || retroHovered || muteHovered || (homePhase === 0 && titleHoverT > 0.1)) ? 'pointer' : 'default';
     } else if (state === STATE.ACHIEVEMENTS || state === STATE.LEADERBOARD) {
       canvas.style.cursor = (backBtnHovered || achCardHovered || muteHovered) ? 'pointer' : 'default';
     } else if (state === STATE.PAUSE) {
